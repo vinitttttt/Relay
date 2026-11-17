@@ -1,8 +1,8 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, selectinload
 
-from app.models import Conversation, ConversationMember, ConversationType, User
+from app.models import Conversation, ConversationMember, ConversationType, Message, User
 
 
 class SelfConversationError(Exception):
@@ -11,6 +11,92 @@ class SelfConversationError(Exception):
 
 class TargetUserNotFoundError(Exception):
     """Raised when the requested conversation participant does not exist."""
+
+
+class ConversationAccessError(Exception):
+    """Raised when a user is not a member of the requested conversation."""
+
+
+def list_user_conversations(session: Session, user_id: int):
+    latest = (
+        select(
+            Message.id.label("message_id"),
+            Message.conversation_id.label("conversation_id"),
+            func.row_number()
+            .over(
+                partition_by=Message.conversation_id,
+                order_by=(Message.created_at.desc(), Message.id.desc()),
+            )
+            .label("position"),
+        )
+        .subquery()
+    )
+    latest_message_id = (
+        select(latest.c.message_id)
+        .where(latest.c.conversation_id == Conversation.id, latest.c.position == 1)
+        .scalar_subquery()
+    )
+    latest_time = select(Message.created_at).where(Message.id == latest_message_id).scalar_subquery()
+    conversations = session.scalars(
+        select(Conversation)
+        .join(ConversationMember)
+        .where(ConversationMember.user_id == user_id)
+        .options(
+            selectinload(Conversation.members).selectinload(ConversationMember.user)
+        )
+        .order_by(func.coalesce(latest_time, Conversation.created_at).desc(), Conversation.id.desc())
+    ).all()
+    conversation_ids = [conversation.id for conversation in conversations]
+    latest_messages = session.scalars(
+        select(Message).where(
+            Message.id.in_(
+                select(latest.c.message_id).where(
+                    latest.c.position == 1,
+                    latest.c.conversation_id.in_(conversation_ids),
+                )
+            )
+        )
+        .options(selectinload(Message.sender))
+    ).all() if conversation_ids else []
+    return conversations, {message.conversation_id: message for message in latest_messages}
+
+
+def _require_membership(session: Session, conversation_id: int, user_id: int) -> None:
+    is_member = session.scalar(
+        select(ConversationMember.id).where(
+            ConversationMember.conversation_id == conversation_id,
+            ConversationMember.user_id == user_id,
+        )
+    )
+    if is_member is None:
+        raise ConversationAccessError
+
+
+def create_message(session: Session, conversation_id: int, user: User, content: str) -> Message:
+    _require_membership(session, conversation_id, user.id)
+    message = Message(conversation_id=conversation_id, sender_id=user.id, content=content)
+    session.add(message)
+    session.commit()
+    session.refresh(message)
+    return message
+
+
+def get_message_page(
+    session: Session, conversation_id: int, user_id: int, limit: int, before_id: int | None
+):
+    _require_membership(session, conversation_id, user_id)
+    statement = select(Message).where(Message.conversation_id == conversation_id)
+    if before_id is not None:
+        statement = statement.where(Message.id < before_id)
+    rows = session.scalars(
+        statement.options(selectinload(Message.sender))
+        .order_by(Message.id.desc())
+        .limit(limit + 1)
+    ).all()
+    has_more = len(rows) > limit
+    page = list(reversed(rows[:limit]))
+    next_cursor = page[0].id if has_more and page else None
+    return page, next_cursor
 
 
 def _find_direct_conversation(

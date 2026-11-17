@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -7,15 +7,87 @@ from app.models import Conversation, User
 from app.schemas.conversations import (
     DirectConversationRequest,
     DirectConversationResponse,
+    ConversationListItem,
+    ConversationMessagePage,
+    MessageCreate,
+    MessageResponse,
 )
 from app.schemas.users import UserSearchResult
 from app.services.conversations import (
     SelfConversationError,
     TargetUserNotFoundError,
+    ConversationAccessError,
+    create_message,
+    get_message_page,
+    list_user_conversations,
     start_or_get_direct_conversation,
 )
 
 router = APIRouter(prefix="/api/v1/conversations", tags=["conversations"])
+
+
+@router.get("", response_model=list[ConversationListItem])
+def get_conversations(
+    session: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ConversationListItem]:
+    conversations, latest_messages = list_user_conversations(session, current_user.id)
+    return [
+        ConversationListItem(
+            id=conversation.id,
+            conversation_type=conversation.conversation_type,
+            name=conversation.name,
+            created_at=conversation.created_at,
+            members=[
+                UserSearchResult.model_validate(member.user)
+                for member in sorted(conversation.members, key=lambda member: member.user_id)
+            ],
+            latest_message=(
+                MessageResponse.model_validate(latest_messages[conversation.id])
+                if conversation.id in latest_messages
+                else None
+            ),
+        )
+        for conversation in conversations
+    ]
+
+
+@router.post(
+    "/{conversation_id}/messages",
+    response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def send_message(
+    conversation_id: int,
+    payload: MessageCreate,
+    session: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MessageResponse:
+    try:
+        message = create_message(session, conversation_id, current_user, payload.content)
+    except ConversationAccessError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+    return MessageResponse.model_validate(message)
+
+
+@router.get("/{conversation_id}/messages", response_model=ConversationMessagePage)
+def get_messages(
+    conversation_id: int,
+    limit: int = Query(default=50, ge=1, le=100),
+    before_id: int | None = Query(default=None, gt=0),
+    session: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationMessagePage:
+    try:
+        messages, next_cursor = get_message_page(
+            session, conversation_id, current_user.id, limit, before_id
+        )
+    except ConversationAccessError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+    return ConversationMessagePage(
+        items=[MessageResponse.model_validate(message) for message in messages],
+        next_cursor=next_cursor,
+    )
 
 
 def _serialize_direct_conversation(

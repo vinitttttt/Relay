@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Conversation, ConversationMember, ConversationType, User
+from app.models import Message
 from app.security.tokens import create_access_token
 from app.services.conversations import start_or_get_direct_conversation
 
@@ -256,6 +257,83 @@ def test_group_conversation_is_not_returned_as_direct(auth_client, test_engine) 
     assert response.status_code == 201
     assert response.json()["conversation_type"] == "direct"
     assert response.json()["id"] != group_id
+
+
+def test_conversation_list_shows_member_direct_conversations_and_activity_order(
+    auth_client, test_engine
+) -> None:
+    ids = seed_users(test_engine, "alice", "bob", "carol", "outsider", "dave")
+    headers = auth_headers(ids["alice"])
+    first = auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["bob"]}, headers=headers).json()
+    second = auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["carol"]}, headers=headers).json()
+    outsider = auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["dave"]}, headers=auth_headers(ids["outsider"])).json()
+    with Session(test_engine) as session:
+        session.add_all([
+            Message(conversation_id=first["id"], sender_id=ids["bob"], content="older activity"),
+            Message(conversation_id=second["id"], sender_id=ids["alice"], content="newer activity"),
+        ])
+        session.commit()
+
+    response = auth_client.get("/api/v1/conversations", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body] == [second["id"], first["id"]]
+    assert all(item["id"] != outsider["id"] for item in body)
+    assert body[0]["latest_message"]["content"] == "newer activity"
+    assert body[0]["latest_message"]["sender"] == {"id": ids["alice"], "username": "alice"}
+    assert {member["username"] for member in body[0]["members"]} == {"alice", "carol"}
+    assert "email" not in str(body) and "hashed_password" not in str(body)
+
+
+def test_message_create_validation_membership_and_response(auth_client, test_engine) -> None:
+    ids = seed_users(test_engine, "alice", "bob", "outsider")
+    conversation = auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["bob"]}, headers=auth_headers(ids["alice"])).json()
+    url = f"/api/v1/conversations/{conversation['id']}/messages"
+    sent = auth_client.post(url, json={"content": "  Hello Relay!  "}, headers=auth_headers(ids["alice"]))
+    assert sent.status_code == 201
+    assert sent.json()["content"] == "  Hello Relay!  "
+    assert sent.json()["conversation_id"] == conversation["id"]
+    assert sent.json()["sender"] == {"id": ids["alice"], "username": "alice"}
+    assert "email" not in str(sent.json()) and "hashed_password" not in str(sent.json())
+    assert auth_client.post(url, json={"content": "   "}, headers=auth_headers(ids["alice"])).status_code == 422
+    assert auth_client.post(url, json={"content": "x" * 5001}, headers=auth_headers(ids["alice"])).status_code == 422
+    assert auth_client.post(url, json={"content": "Intrusion"}, headers=auth_headers(ids["outsider"])).status_code == 404
+
+
+def test_message_history_is_chronological_and_paginated(auth_client, test_engine) -> None:
+    ids = seed_users(test_engine, "alice", "bob", "outsider")
+    conversation = auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["bob"]}, headers=auth_headers(ids["alice"])).json()
+    conversation_id = conversation["id"]
+    with Session(test_engine) as session:
+        session.add_all([
+            Message(conversation_id=conversation_id, sender_id=ids["alice"], content=f"message {index}")
+            for index in range(5)
+        ])
+        session.commit()
+    url = f"/api/v1/conversations/{conversation_id}/messages"
+    headers = auth_headers(ids["alice"])
+    newest = auth_client.get(url, params={"limit": 2}, headers=headers)
+    assert newest.status_code == 200
+    newest_body = newest.json()
+    assert [item["content"] for item in newest_body["items"]] == ["message 3", "message 4"]
+    assert newest_body["next_cursor"] == newest_body["items"][0]["id"]
+    older = auth_client.get(url, params={"limit": 2, "before_id": newest_body["next_cursor"]}, headers=headers)
+    assert [item["content"] for item in older.json()["items"]] == ["message 1", "message 2"]
+    assert older.json()["next_cursor"] == older.json()["items"][0]["id"]
+    last = auth_client.get(url, params={"limit": 2, "before_id": older.json()["next_cursor"]}, headers=headers)
+    assert [item["content"] for item in last.json()["items"]] == ["message 0"]
+    assert last.json()["next_cursor"] is None
+    assert auth_client.get(url, headers=auth_headers(ids["outsider"])).status_code == 404
+
+
+def test_conversation_list_handles_no_messages_and_requires_auth(auth_client, test_engine) -> None:
+    ids = seed_users(test_engine, "alice", "bob")
+    auth_client.post("/api/v1/conversations/direct", json={"target_user_id": ids["bob"]}, headers=auth_headers(ids["alice"]))
+    response = auth_client.get("/api/v1/conversations", headers=auth_headers(ids["alice"]))
+    assert response.status_code == 200
+    assert response.json()[0]["latest_message"] is None
+    assert auth_client.get("/api/v1/conversations").status_code == 401
 
 
 def test_concurrent_direct_pair_conflict_returns_winning_conversation() -> None:
