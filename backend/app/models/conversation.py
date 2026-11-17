@@ -14,7 +14,15 @@ class ConversationType(str, enum.Enum):
 
 class Conversation(Base):
     __tablename__ = "conversations"
-    __table_args__ = (Index("ix_conversations_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_conversations_created_at", "created_at"),
+        Index(
+            "uq_conversations_direct_user_pair",
+            "direct_user_low_id",
+            "direct_user_high_id",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_type: Mapped[ConversationType] = mapped_column(
@@ -28,6 +36,9 @@ class Conversation(Base):
         nullable=False,
     )
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Canonical pair keys support the unique index; membership rows retain user FKs.
+    direct_user_low_id: Mapped[int | None] = mapped_column(nullable=True)
+    direct_user_high_id: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
