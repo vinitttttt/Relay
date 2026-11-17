@@ -17,6 +17,22 @@ class ConversationAccessError(Exception):
     """Raised when a user is not a member of the requested conversation."""
 
 
+def get_conversation_user(
+    session: Session, conversation_id: int, user_id: int
+) -> User:
+    user = session.scalar(
+        select(User)
+        .join(ConversationMember, ConversationMember.user_id == User.id)
+        .where(
+            ConversationMember.conversation_id == conversation_id,
+            User.id == user_id,
+        )
+    )
+    if user is None:
+        raise ConversationAccessError
+    return user
+
+
 def list_user_conversations(session: Session, user_id: int):
     latest = (
         select(
