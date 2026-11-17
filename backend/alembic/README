@@ -1,0 +1,4 @@
+Alembic migrations for the Relay PostgreSQL schema.
+
+Connection settings are loaded from the root .env file by env.py. Run Alembic
+commands from the backend directory with the backend virtual environment active.
