@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { navigate } from '../auth/router.jsx'
+import { ChatWindow } from './ChatWindow.jsx'
 import './Workspace.css'
 
 function conversationTitle(conversation, user) {
@@ -131,7 +132,7 @@ export function Workspace() {
       />
       <section className="workspace-main" aria-label="Conversation area">
         {selected
-          ? <ConversationHeader conversation={selected} title={conversationTitle(selected, user)} onBack={() => setSelectedId(null)} />
+          ? <ChatWindow key={selected.id} conversation={selected} title={conversationTitle(selected, user)} user={user} apiFetch={apiFetch} onBack={() => setSelectedId(null)} />
           : <ChatPlaceholder username={user?.username} />}
       </section>
     </main>
@@ -214,24 +215,6 @@ function ProfileSection({ user, onSignOut }) {
       <div className="profile-copy"><strong>{user?.username || 'Your account'}</strong><span>Personal workspace</span></div>
       <button className="signout-button" type="button" onClick={onSignOut} aria-label="Log out" title="Log out"><LogoutIcon /></button>
     </footer>
-  )
-}
-
-function ConversationHeader({ conversation, title, onBack }) {
-  return (
-    <>
-      <header className="conversation-header">
-        <button className="mobile-back-button" type="button" onClick={onBack} aria-label="Back to conversations">‹</button>
-        <Avatar name={title} large />
-        <div><h1>{title}</h1><p>{conversation.conversation_type === 'direct' ? 'Direct conversation' : 'Group conversation'}</p></div>
-      </header>
-      <div className="conversation-placeholder">
-        <span className="placeholder-illustration"><MessageIcon /></span>
-        <p className="form-eyebrow">YOUR SPACE WITH {title.toUpperCase()}</p>
-        <h2>Good conversations start here.</h2>
-        <p>Messages will appear here. Your conversation is ready when you are.</p>
-      </div>
-    </>
   )
 }
 
