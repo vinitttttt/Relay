@@ -3,6 +3,7 @@ import './App.css'
 import { AuthProvider, useAuth } from './auth/AuthContext.jsx'
 import { Link, navigate, usePathname } from './auth/router.jsx'
 import { LoginScreen, RegisterScreen } from './auth/AuthScreens.jsx'
+import { Workspace } from './workspace/Workspace.jsx'
 
 function App() {
   return (
@@ -32,7 +33,7 @@ function AppRoutes() {
 
   if (pathname === '/login') return <LoginScreen />
   if (pathname === '/register') return <RegisterScreen />
-  return <ProtectedPlaceholder />
+  return <Workspace />
 }
 
 function RedirectTo({ path }) {
