@@ -64,6 +64,10 @@ The API is available at <http://localhost:8000>; interactive documentation is at
 
 Message creation accepts an optional client generated `client_message_id`. Relay stores it uniquely per sender and conversation, returns the existing message for an identical retry, and reports a conflict if the same ID is reused with different content. New clients send this ID over either REST or WebSocket; REST history supports both older `before_id` pages and forward `after_id` pages for reconnect recovery.
 
+Application-created user, conversation, membership, and message timestamps use UTC. SQLite stores its `DateTime` values without timezone metadata, so existing naive timestamps are interpreted as UTC when serialized; API and WebSocket timestamps are emitted with a `Z` suffix. No timestamp data migration is needed. Direct-conversation participant IDs now have restrictive user foreign keys, preventing deletion from leaving an orphaned direct conversation.
+
+Backend logs are JSON records with UTC timestamps and event context. Expected failures are logged without request bodies or credentials; unexpected errors include exception type and traceback locations while omitting exception text. Clients receive generic server-error details.
+
 Emails are trimmed and normalized to lowercase. Passwords are hashed with Argon2 before storage. Login failures use the same response for unknown accounts and incorrect passwords. Public responses never include password hashes.
 
 `JWT_SECRET_KEY` is required for token creation and must be at least 32 bytes. `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` controls access-token lifetime and defaults to 30 minutes. Tokens use HS256 and are checked for signature, expiration, token type, and an existing user.
@@ -100,7 +104,7 @@ python -m pytest tests
 - `ConversationMember` links users to conversations and records when they joined.
 - `Message` stores content, its conversation, sender, and creation time.
 
-The models use SQLAlchemy relationships, foreign keys, unique constraints, and indexes. Alembic uses the same `DATABASE_URL` as the application. After changing models, create and review a revision with `alembic revision --autogenerate -m "describe the change"`, then apply it with `alembic upgrade head`. To roll back one revision, use `alembic downgrade -1`.
+The models use SQLAlchemy relationships, foreign keys, unique constraints, and indexes. Alembic uses the same `DATABASE_URL` as the application. After changing models, create and review a revision with `alembic revision --autogenerate -m "describe the change"`, then apply it with `alembic upgrade head`. To roll back one revision, use `alembic downgrade -1`. The UTC serialization change does not alter the timestamp schema; the new direct participant foreign keys are added with an SQLite compatible table rebuild that preserves existing rows.
 
 ## PostgreSQL later
 

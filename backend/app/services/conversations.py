@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.models import Conversation, ConversationMember, ConversationType, Message, User
+from app.core.time import utc_now
 
 
 class SelfConversationError(Exception):
@@ -128,6 +129,7 @@ def create_message(
         sender_id=user.id,
         content=content,
         client_message_id=client_message_id,
+        created_at=utc_now(),
     )
     session.add(message)
     if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
@@ -249,6 +251,7 @@ def start_or_get_direct_conversation(
         conversation_type=ConversationType.DIRECT,
         direct_user_low_id=low_user_id,
         direct_user_high_id=high_user_id,
+        created_at=utc_now(),
     )
     session.add(conversation)
     session.add_all(
@@ -256,10 +259,12 @@ def start_or_get_direct_conversation(
             ConversationMember(
                 conversation=conversation,
                 user_id=current_user_id,
+                joined_at=utc_now(),
             ),
             ConversationMember(
                 conversation=conversation,
                 user_id=target_user_id,
+                joined_at=utc_now(),
             ),
         ]
     )

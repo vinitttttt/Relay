@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import User
+from app.core.time import utc_now
 from app.security.passwords import hash_password, verify_password
 
 
@@ -26,6 +27,7 @@ def register_user(session: Session, username: str, email: str, password: str) ->
         username=username,
         email=email,
         hashed_password=hash_password(password),
+        created_at=utc_now(),
     )
     session.add(user)
     try:

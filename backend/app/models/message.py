@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.core.time import utc_now
 
 
 class Message(Base):
@@ -28,7 +29,7 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     client_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+        DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")

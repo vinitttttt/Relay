@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from functools import lru_cache
+import logging
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event, text
@@ -8,6 +9,9 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_database_url
+from app.core.logging import log_exception
+
+logger = logging.getLogger("relay.database")
 
 
 @lru_cache(maxsize=1)
@@ -59,6 +63,7 @@ def database_is_available() -> bool:
     try:
         with get_engine().connect() as connection:
             connection.execute(text("SELECT 1"))
-    except (SQLAlchemyError, RuntimeError, ValueError):
+    except (SQLAlchemyError, RuntimeError, ValueError) as exc:
+        log_exception(logger, "database.connectivity_check_failed", exc)
         return False
     return True

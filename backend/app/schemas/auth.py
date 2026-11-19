@@ -8,8 +8,10 @@ from pydantic import (
     Field,
     SecretStr,
     StringConstraints,
+    field_serializer,
     field_validator,
 )
+from app.core.time import utc_isoformat
 
 
 Username = Annotated[
@@ -52,6 +54,10 @@ class UserPublic(BaseModel):
     username: str
     email: EmailStr
     created_at: datetime
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime) -> str:
+        return utc_isoformat(value)
 
 
 class AccessTokenResponse(BaseModel):

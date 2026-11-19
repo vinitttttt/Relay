@@ -1,7 +1,10 @@
 from collections import defaultdict
 from datetime import datetime, timezone
+import logging
 
 from fastapi import WebSocket
+
+logger = logging.getLogger("relay.websocket")
 
 
 class ConnectionManager:
@@ -49,6 +52,15 @@ class ConnectionManager:
     ) -> bool:
         if not self.is_expired(websocket):
             return False
+        logger.warning(
+            "WebSocket authentication expired",
+            extra={
+                "event": "websocket.authentication_expired",
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "close_code": 4408,
+            },
+        )
         try:
             await websocket.close(code=4408, reason="Authentication expired.")
         except Exception:
@@ -65,8 +77,17 @@ class ConnectionManager:
                     continue
                 try:
                     await websocket.send_json(payload)
-                except Exception:
+                except Exception as exc:
                     # One dead client must not prevent delivery to other clients.
+                    logger.debug(
+                        "WebSocket client became unavailable during broadcast",
+                        extra={
+                            "event": "websocket.broadcast_client_unavailable",
+                            "user_id": user_id,
+                            "conversation_id": conversation_id,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
                     stale.append((user_id, websocket))
         for user_id, websocket in stale:
             self.disconnect(websocket, conversation_id, user_id)

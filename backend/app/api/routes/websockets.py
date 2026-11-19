@@ -1,12 +1,15 @@
 import json
 import asyncio
 from datetime import datetime, timezone
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.api.websocket_manager import connection_manager
+from app.core.time import utc_isoformat
 from app.core.config import get_allowed_origins, get_rate_limit, get_rate_limit_window_seconds
+from app.core.logging import log_exception
 from app.core.rate_limit import rate_limiter
 from app.db.session import get_session_factory
 from app.models import User
@@ -26,6 +29,7 @@ from app.services.conversations import (
 )
 
 router = APIRouter(tags=["websockets"])
+logger = logging.getLogger("relay.websocket")
 
 
 def _authenticate_and_authorize(conversation_id: int, user_id: int) -> User | None:
@@ -64,7 +68,7 @@ def _persist_message(
                 "sender_username": user.username,
                 "content": message.content,
                 "client_message_id": message.client_message_id,
-                "created_at": message.created_at.isoformat(),
+                "created_at": utc_isoformat(message.created_at),
             },
         }, created
 
@@ -73,6 +77,14 @@ def _persist_message(
 async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> None:
     origin = websocket.headers.get("origin")
     if origin is not None and origin.rstrip("/") not in get_allowed_origins():
+        logger.warning(
+            "WebSocket origin rejected",
+            extra={
+                "event": "websocket.origin_rejected",
+                "conversation_id": conversation_id,
+                "close_code": 4403,
+            },
+        )
         await websocket.close(code=4403, reason="WebSocket origin is not allowed.")
         return
 
@@ -80,16 +92,53 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
         ticket_from_subprotocols(websocket.headers.get("sec-websocket-protocol"))
     )
     if ticket is None:
+        logger.warning(
+            "WebSocket authentication failed",
+            extra={
+                "event": "websocket.authentication_failed",
+                "conversation_id": conversation_id,
+                "close_code": 4401,
+            },
+        )
         await websocket.close(code=4401, reason="Invalid or expired WebSocket ticket.")
         return
 
     user_id = ticket.user_id
-    user = _authenticate_and_authorize(conversation_id, user_id)
+    try:
+        user = _authenticate_and_authorize(conversation_id, user_id)
+    except Exception as exc:
+        log_exception(
+            logger,
+            "websocket.authentication_error",
+            exc,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        await websocket.close(code=1011, reason="Authentication service unavailable.")
+        return
     if user is None:
+        logger.warning(
+            "WebSocket conversation access denied",
+            extra={
+                "event": "websocket.access_denied",
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "close_code": 4403,
+            },
+        )
         await websocket.close(code=4403, reason="Conversation access denied.")
         return
 
     if ticket.authentication_expires_at <= datetime.now(timezone.utc):
+        logger.warning(
+            "WebSocket authentication expired before connect",
+            extra={
+                "event": "websocket.authentication_expired",
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "close_code": 4408,
+            },
+        )
         await websocket.close(code=4408, reason="Authentication expired.")
         return
 
@@ -100,6 +149,10 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
         user_id,
         ticket.authentication_expires_at,
         subprotocol=WEBSOCKET_SUBPROTOCOL,
+    )
+    logger.info(
+        "WebSocket connected",
+        extra={"event": "websocket.connected", "user_id": user_id, "conversation_id": conversation_id},
     )
     try:
         await websocket.send_json(
@@ -158,6 +211,16 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                 get_rate_limit("WEBSOCKET_MESSAGE", 30),
                 get_rate_limit_window_seconds("WEBSOCKET_MESSAGE", 10),
             ):
+                logger.warning(
+                    "WebSocket message rate limited",
+                    extra={
+                        "event": "rate_limit.rejected",
+                        "category": "websocket_message",
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                        "status_code": 429,
+                    },
+                )
                 await websocket.send_json(
                     {
                         "type": "error",
@@ -195,7 +258,14 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                     }
                 )
                 continue
-            except Exception:
+            except Exception as exc:
+                log_exception(
+                    logger,
+                    "websocket.message_save_error",
+                    exc,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
                 await websocket.send_json(
                     {
                         "type": "error",
@@ -212,6 +282,27 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
             else:
                 await websocket.send_json(event)
     except WebSocketDisconnect:
-        pass
+        logger.info(
+            "WebSocket disconnected",
+            extra={"event": "websocket.disconnected", "user_id": user_id, "conversation_id": conversation_id},
+        )
+    except Exception as exc:
+        log_exception(
+            logger,
+            "websocket.unexpected_error",
+            exc,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        try:
+            await websocket.send_json(
+                {"type": "error", "data": {"code": "internal_error", "detail": "An unexpected server error occurred."}}
+            )
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1011, reason="Internal server error.")
+        except Exception:
+            pass
     finally:
         connection_manager.disconnect(websocket, conversation_id, user_id)

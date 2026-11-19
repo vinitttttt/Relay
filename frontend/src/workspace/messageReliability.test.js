@@ -7,6 +7,7 @@ import {
   mergeMessages,
   recoverMessagesAfter,
 } from './messageReliability.js'
+import { apiDate, parseApiTimestamp } from './timestamps.js'
 
 const own = (id, clientId, content, extra = {}) => ({
   id,
@@ -68,4 +69,11 @@ test('recovery stops safely on an empty or non-advancing page', async () => {
   }, 7, 5, 2)
   assert.equal(emptyCalls, 1)
   assert.deepEqual(empty, [])
+})
+
+test('UTC and legacy SQLite timestamps parse as the same instant', () => {
+  const utc = '2025-02-03T04:05:06Z'
+  const legacy = '2025-02-03T04:05:06'
+  assert.equal(parseApiTimestamp(legacy), `${legacy}Z`)
+  assert.equal(apiDate(utc).toISOString(), apiDate(legacy).toISOString())
 })

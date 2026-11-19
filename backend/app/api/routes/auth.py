@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
+import logging
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -10,6 +11,7 @@ from app.core.config import (
     get_rate_limit_window_seconds,
 )
 from app.core.rate_limit import check_rate_limit
+from app.core.logging import log_exception
 from app.db.session import get_db
 from app.models import User
 from app.schemas.auth import (
@@ -33,6 +35,7 @@ from app.services.auth import (
 )
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+logger = logging.getLogger("relay.auth")
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -64,6 +67,12 @@ def register(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email is already registered.",
         ) from exc
+    except Exception as exc:
+        log_exception(
+            logger, "authentication.registration_error", exc,
+            method=request.method, path=request.url.path,
+        )
+        raise HTTPException(status_code=500, detail="Registration could not be completed.") from None
 
 
 @router.post("/login", response_model=AccessTokenResponse)
@@ -87,11 +96,26 @@ def login(
             password=payload.password.get_secret_value(),
         )
     except InvalidCredentialsError as exc:
+        logger.warning(
+            "Authentication failed",
+            extra={
+                "event": "authentication.failed",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status.HTTP_401_UNAUTHORIZED,
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email/username or password.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    except Exception as exc:
+        log_exception(
+            logger, "authentication.login_error", exc,
+            method=request.method, path=request.url.path,
+        )
+        raise HTTPException(status_code=500, detail="Authentication could not be completed.") from None
 
     return AccessTokenResponse(
         access_token=create_access_token(user.id),
@@ -118,6 +142,14 @@ def issue_websocket_ticket(
             get_access_token_expiration(credentials.credentials),
         )
     except RuntimeError as exc:
+        logger.warning(
+            "WebSocket ticket service unavailable",
+            extra={
+                "event": "authentication.websocket_ticket_unavailable",
+                "user_id": current_user.id,
+                "status_code": 503,
+            },
+        )
         raise HTTPException(status_code=503, detail="WebSocket ticket service unavailable.") from exc
     except (ValueError, InvalidAccessToken, jwt.InvalidTokenError) as exc:
         raise HTTPException(status_code=401, detail="Not authenticated") from exc

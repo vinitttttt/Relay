@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { navigate } from '../auth/router.jsx'
 import { ChatWindow } from './ChatWindow.jsx'
+import { apiDate } from './timestamps.js'
 import './Workspace.css'
 
 function conversationTitle(conversation, user) {
@@ -13,7 +14,7 @@ function conversationTitle(conversation, user) {
 
 function formatTime(value) {
   if (!value) return ''
-  const date = new Date(value)
+  const date = apiDate(value)
   if (Number.isNaN(date.getTime())) return ''
   const now = new Date()
   if (date.toDateString() === now.toDateString()) return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date)

@@ -8,9 +8,10 @@ import {
   MESSAGE_PAGE_SIZE,
   recoverMessagesAfter,
 } from './messageReliability.js'
+import { apiDate } from './timestamps.js'
 
 function formatMessageTime(value) {
-  const date = new Date(value)
+  const date = apiDate(value)
   if (Number.isNaN(date.getTime())) return ''
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date)
 }

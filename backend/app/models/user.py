@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.core.time import utc_now
 
 
 class User(Base):
@@ -18,7 +19,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(254), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+        DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
 
     memberships: Mapped[list["ConversationMember"]] = relationship(

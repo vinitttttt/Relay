@@ -4,6 +4,7 @@ from sqlalchemy import DateTime, ForeignKey, Index, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.core.time import utc_now
 
 
 class ConversationMember(Base):
@@ -23,7 +24,7 @@ class ConversationMember(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     joined_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+        DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
 
     conversation: Mapped["Conversation"] = relationship(back_populates="members")

@@ -1,7 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
+from app.core.time import utc_isoformat
 from app.models.conversation import ConversationType
 from app.schemas.users import UserSearchResult
 
@@ -18,6 +19,10 @@ class DirectConversationResponse(BaseModel):
     name: str | None
     created_at: datetime
     members: list[UserSearchResult]
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime) -> str:
+        return utc_isoformat(value)
 
 
 class MessageCreate(BaseModel):
@@ -42,6 +47,10 @@ class MessageResponse(BaseModel):
     created_at: datetime
     sender: UserSearchResult
 
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime) -> str:
+        return utc_isoformat(value)
+
 
 class ConversationListItem(BaseModel):
     id: int
@@ -50,6 +59,10 @@ class ConversationListItem(BaseModel):
     created_at: datetime
     members: list[UserSearchResult]
     latest_message: MessageResponse | None
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime) -> str:
+        return utc_isoformat(value)
 
 
 class ConversationMessagePage(BaseModel):

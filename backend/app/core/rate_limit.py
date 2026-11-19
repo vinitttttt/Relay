@@ -1,6 +1,7 @@
 """Small bounded sliding-window limiter for a single backend process."""
 
 from collections import OrderedDict, deque
+import logging
 from threading import Lock
 import time
 
@@ -50,10 +51,15 @@ class InMemoryRateLimiter:
 
 
 rate_limiter = InMemoryRateLimiter()
+logger = logging.getLogger("relay.rate_limit")
 
 
 def check_rate_limit(category: str, identity: str, limit: int, window: int) -> None:
     if not rate_limiter.allow(category, identity, limit, window):
+        logger.warning(
+            "Rate limit rejected",
+            extra={"event": "rate_limit.rejected", "category": category, "status_code": 429},
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests. Please try again later.",

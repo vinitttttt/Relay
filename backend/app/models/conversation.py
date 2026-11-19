@@ -1,10 +1,11 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Index, String, text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.core.time import utc_now
 
 
 class ConversationType(str, enum.Enum):
@@ -37,10 +38,14 @@ class Conversation(Base):
     )
     name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Canonical pair keys support the unique index; membership rows retain user FKs.
-    direct_user_low_id: Mapped[int | None] = mapped_column(nullable=True)
-    direct_user_high_id: Mapped[int | None] = mapped_column(nullable=True)
+    direct_user_low_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    direct_user_high_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+        DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
 
     members: Mapped[list["ConversationMember"]] = relationship(
