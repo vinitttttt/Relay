@@ -26,6 +26,12 @@ def create_access_token(user_id: int) -> str:
 
 def decode_access_token(token: str) -> int:
     """Verify an access token and return its user ID subject."""
+    claims = decode_access_token_claims(token)
+    return int(claims["sub"])
+
+
+def decode_access_token_claims(token: str) -> dict:
+    """Verify an access token and return its validated claims."""
     claims = jwt.decode(
         token,
         get_jwt_secret_key(),
@@ -41,4 +47,13 @@ def decode_access_token(token: str) -> int:
         or int(subject) < 1
     ):
         raise InvalidAccessToken
-    return int(subject)
+    return claims
+
+
+def get_access_token_expiration(token: str) -> datetime:
+    """Return the verified access token's expiration as an aware UTC datetime."""
+    claims = decode_access_token_claims(token)
+    expiration = claims.get("exp")
+    if not isinstance(expiration, (int, float)):
+        raise InvalidAccessToken
+    return datetime.fromtimestamp(expiration, timezone.utc)

@@ -58,3 +58,8 @@ class AccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
+
+
+class WebSocketTicketResponse(BaseModel):
+    ticket: str
+    expires_in: int

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { conversationWebSocketUrl } from '../auth/api.js'
+import { createTicketedWebSocket } from '../auth/api.js'
 
 const PAGE_SIZE = 50
 
@@ -39,7 +39,7 @@ function reconcilePending(messages, pending, userId) {
   return messages.filter((message) => !confirmedIds.has(message.id))
 }
 
-export function ChatWindow({ conversation, title, user, token, apiFetch, onBack, onMessage }) {
+export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMessage }) {
   const [messages, setMessages] = useState([])
   const [nextCursor, setNextCursor] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -97,13 +97,22 @@ export function ChatWindow({ conversation, title, user, token, apiFetch, onBack,
         }
       } catch { /* The next reconnect or normal history retry can recover it. */ }
     }
-    const connect = () => {
+    const connect = async () => {
       if (stopped) return
       updateConnectionStatus(attempts ? 'reconnecting' : 'connecting')
       try {
-        socket = new WebSocket(conversationWebSocketUrl(conversation.id, token))
-      } catch {
+        socket = await createTicketedWebSocket(apiFetch, conversation.id)
+      } catch (error) {
+        if (stopped) return
+        if (error.status === 401 || error.status === 403) {
+          updateConnectionStatus('disconnected')
+          return
+        }
         scheduleReconnect()
+        return
+      }
+      if (stopped) {
+        socket.close()
         return
       }
       socketRef.current = socket
@@ -155,7 +164,7 @@ export function ChatWindow({ conversation, title, user, token, apiFetch, onBack,
       socket.onclose = (event) => {
         if (socketRef.current === socket) socketRef.current = null
         if (stopped) return
-        if (event.code === 4401 || event.code === 4403 || event.code === 4404) {
+        if (event.code === 4403 || event.code === 4404) {
           updateConnectionStatus('disconnected')
           return
         }
@@ -191,7 +200,7 @@ export function ChatWindow({ conversation, title, user, token, apiFetch, onBack,
         socket.close()
       }
     }
-  }, [apiFetch, conversation.id, onMessage, token, user.id, updateConnectionStatus])
+  }, [apiFetch, conversation.id, onMessage, user.id, updateConnectionStatus])
 
   useLayoutEffect(() => {
     const container = scrollRef.current

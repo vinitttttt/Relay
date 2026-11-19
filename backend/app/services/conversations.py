@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, selectinload
@@ -15,6 +17,10 @@ class TargetUserNotFoundError(Exception):
 
 class ConversationAccessError(Exception):
     """Raised when a user is not a member of the requested conversation."""
+
+
+class AuthenticationExpiredError(Exception):
+    """Raised when a WebSocket session expires before message commit."""
 
 
 def get_conversation_user(
@@ -88,10 +94,23 @@ def _require_membership(session: Session, conversation_id: int, user_id: int) ->
         raise ConversationAccessError
 
 
-def create_message(session: Session, conversation_id: int, user: User, content: str) -> Message:
+def create_message(
+    session: Session,
+    conversation_id: int,
+    user: User,
+    content: str,
+    authentication_expires_at: datetime | None = None,
+) -> Message:
+    if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
+        raise AuthenticationExpiredError
     _require_membership(session, conversation_id, user.id)
+    if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
+        raise AuthenticationExpiredError
     message = Message(conversation_id=conversation_id, sender_id=user.id, content=content)
     session.add(message)
+    if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
+        session.rollback()
+        raise AuthenticationExpiredError
     session.commit()
     session.refresh(message)
     return message

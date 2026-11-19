@@ -21,7 +21,7 @@ function formatTime(value) {
 }
 
 export function Workspace() {
-  const { user, token, signOut, apiFetch } = useAuth()
+  const { user, signOut, apiFetch } = useAuth()
   const [conversations, setConversations] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [loadingConversations, setLoadingConversations] = useState(true)
@@ -142,7 +142,7 @@ export function Workspace() {
       />
       <section className="workspace-main" aria-label="Conversation area">
         {selected
-          ? <ChatWindow key={selected.id} conversation={selected} title={conversationTitle(selected, user)} user={user} token={token} apiFetch={apiFetch} onMessage={updateConversationPreview} onBack={() => setSelectedId(null)} />
+          ? <ChatWindow key={selected.id} conversation={selected} title={conversationTitle(selected, user)} user={user} apiFetch={apiFetch} onMessage={updateConversationPreview} onBack={() => setSelectedId(null)} />
           : <ChatPlaceholder username={user?.username} />}
       </section>
     </main>

@@ -1,6 +1,6 @@
 # Relay
 
-Relay is a full-stack real-time messaging application scaffold built with FastAPI, React, SQLAlchemy, and SQLite. The backend includes user registration, password login, JWT-protected profile access, database models, and Alembic migrations. Messaging and WebSocket behavior are not implemented yet.
+Relay is a full-stack real-time messaging application built with FastAPI, React, SQLAlchemy, and SQLite. It includes user registration and login, conversation and message REST APIs, paginated history, and authenticated real-time messaging over WebSockets.
 
 ## Repository layout
 
@@ -65,6 +65,10 @@ The API is available at <http://localhost:8000>; interactive documentation is at
 Emails are trimmed and normalized to lowercase. Passwords are hashed with Argon2 before storage. Login failures use the same response for unknown accounts and incorrect passwords. Public responses never include password hashes.
 
 `JWT_SECRET_KEY` is required for token creation and must be at least 32 bytes. `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` controls access-token lifetime and defaults to 30 minutes. Tokens use HS256 and are checked for signature, expiration, token type, and an existing user.
+
+The frontend obtains a short-lived, single-use WebSocket ticket through `POST /api/v1/auth/websocket-ticket`. The WebSocket endpoint consumes the ticket and binds the connection lifetime to the authenticated JWT expiration. Tickets and active connection state are stored in process memory. This is suitable only for a single backend process; multiple workers or replicas need a shared ticket store and cross-process WebSocket broadcast mechanism.
+
+For deployment, serve the frontend and API on the same origin or configure a strict CORS allowlist at FastAPI or the reverse proxy. The reverse proxy must forward WebSocket upgrades from `/ws` and use WSS when serving the site over HTTPS. Do not log the `Sec-WebSocket-Protocol` request header because it carries the temporary ticket.
 
 Run backend tests from `backend/` with:
 

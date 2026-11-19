@@ -1,6 +1,7 @@
 import json
+import asyncio
+from datetime import datetime, timezone
 
-import jwt
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
@@ -9,8 +10,13 @@ from app.db.session import get_session_factory
 from app.models import User
 from app.schemas.conversations import MessageCreate
 from app.schemas.websockets import WebSocketMessageRequest
-from app.security.tokens import InvalidAccessToken, decode_access_token
+from app.security.websocket_tickets import (
+    WEBSOCKET_SUBPROTOCOL,
+    ticket_from_subprotocols,
+    websocket_ticket_store,
+)
 from app.services.conversations import (
+    AuthenticationExpiredError,
     ConversationAccessError,
     create_message,
     get_conversation_user,
@@ -19,13 +25,7 @@ from app.services.conversations import (
 router = APIRouter(tags=["websockets"])
 
 
-def _authenticate_and_authorize(conversation_id: int, token: str | None) -> User | None:
-    if not token:
-        return None
-    try:
-        user_id = decode_access_token(token)
-    except (InvalidAccessToken, jwt.InvalidTokenError, RuntimeError):
-        return None
+def _authenticate_and_authorize(conversation_id: int, user_id: int) -> User | None:
     with get_session_factory()() as session:
         try:
             return get_conversation_user(session, conversation_id, user_id)
@@ -33,12 +33,23 @@ def _authenticate_and_authorize(conversation_id: int, token: str | None) -> User
             return None
 
 
-def _persist_message(conversation_id: int, user_id: int, content: str) -> dict:
+def _persist_message(
+    conversation_id: int,
+    user_id: int,
+    content: str,
+    authentication_expires_at: datetime,
+) -> dict:
     with get_session_factory()() as session:
         user = session.get(User, user_id)
         if user is None:
             raise ConversationAccessError
-        message = create_message(session, conversation_id, user, content)
+        message = create_message(
+            session,
+            conversation_id,
+            user,
+            content,
+            authentication_expires_at=authentication_expires_at,
+        )
         return {
             "type": "message.created",
             "data": {
@@ -54,13 +65,31 @@ def _persist_message(conversation_id: int, user_id: int, content: str) -> dict:
 
 @router.websocket("/ws/conversations/{conversation_id}")
 async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> None:
-    user = _authenticate_and_authorize(conversation_id, websocket.query_params.get("token"))
+    ticket = websocket_ticket_store.consume(
+        ticket_from_subprotocols(websocket.headers.get("sec-websocket-protocol"))
+    )
+    if ticket is None:
+        await websocket.close(code=4401, reason="Invalid or expired WebSocket ticket.")
+        return
+
+    user_id = ticket.user_id
+    user = _authenticate_and_authorize(conversation_id, user_id)
     if user is None:
-        await websocket.close(code=4401, reason="Invalid authentication or conversation access.")
+        await websocket.close(code=4403, reason="Conversation access denied.")
+        return
+
+    if ticket.authentication_expires_at <= datetime.now(timezone.utc):
+        await websocket.close(code=4408, reason="Authentication expired.")
         return
 
     user_id = user.id
-    await connection_manager.connect(websocket, conversation_id, user_id)
+    await connection_manager.connect(
+        websocket,
+        conversation_id,
+        user_id,
+        ticket.authentication_expires_at,
+        subprotocol=WEBSOCKET_SUBPROTOCOL,
+    )
     try:
         await websocket.send_json(
             {
@@ -70,7 +99,33 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
         )
         while True:
             try:
-                raw_payload = await websocket.receive_text()
+                remaining = (
+                    ticket.authentication_expires_at - datetime.now(timezone.utc)
+                ).total_seconds()
+                if remaining <= 0:
+                    await connection_manager.close_if_expired(
+                        websocket, conversation_id, user_id
+                    )
+                    return
+                if await connection_manager.close_if_expired(websocket, conversation_id, user_id):
+                    return
+                raw_payload = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                if await connection_manager.close_if_expired(
+                    websocket, conversation_id, user_id
+                ):
+                    return
+                continue
+            except WebSocketDisconnect:
+                raise
+
+            try:
+                if await connection_manager.close_if_expired(
+                    websocket, conversation_id, user_id
+                ):
+                    return
                 request = WebSocketMessageRequest.model_validate_json(raw_payload)
                 message_request = MessageCreate(content=request.content)
             except (json.JSONDecodeError, ValidationError, ValueError):
@@ -86,7 +141,17 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                 continue
 
             try:
-                event = _persist_message(conversation_id, user_id, message_request.content)
+                event = _persist_message(
+                    conversation_id,
+                    user_id,
+                    message_request.content,
+                    ticket.authentication_expires_at,
+                )
+            except AuthenticationExpiredError:
+                await connection_manager.close_if_expired(
+                    websocket, conversation_id, user_id
+                )
+                return
             except Exception:
                 await websocket.send_json(
                     {

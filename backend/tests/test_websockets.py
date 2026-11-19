@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import jwt
 import pytest
@@ -12,6 +14,13 @@ from app.api.websocket_manager import connection_manager
 from app.core.config import get_jwt_secret_key
 from app.models import Conversation, ConversationMember, ConversationType, Message, User
 from app.security.tokens import create_access_token
+from app.security.websocket_tickets import (
+    TICKET_SUBPROTOCOL_PREFIX,
+    WEBSOCKET_SUBPROTOCOL,
+    WebSocketTicketStore,
+    websocket_ticket_store,
+)
+from app.services.conversations import AuthenticationExpiredError
 
 
 @pytest.fixture
@@ -46,52 +55,87 @@ def make_users_and_conversations(test_engine):
         return {name: user.id for name, user in by_name.items()}, first.id, second.id
 
 
-def expired_token(user_id: int) -> str:
-    now = datetime.now(timezone.utc)
-    return jwt.encode(
-        {
-            "sub": str(user_id),
-            "iat": now - timedelta(minutes=2),
-            "exp": now - timedelta(minutes=1),
-            "type": "access",
-        },
-        get_jwt_secret_key(),
-        algorithm="HS256",
+def issue_ticket(client: TestClient, user_id: int, token: str | None = None) -> str:
+    access_token = token or create_access_token(user_id)
+    response = client.post(
+        "/api/v1/auth/websocket-ticket",
+        headers={"Authorization": f"Bearer {access_token}"},
     )
+    assert response.status_code == 200
+    return response.json()["ticket"]
+
+
+def ticket_protocols(ticket: str | None = None) -> list[str]:
+    protocols = [WEBSOCKET_SUBPROTOCOL]
+    if ticket is not None:
+        protocols.append(f"{TICKET_SUBPROTOCOL_PREFIX}{ticket}")
+    return protocols
 
 
 def test_websocket_authentication_success_and_rejections(
-    websocket_client, test_engine
+    websocket_client, test_engine, monkeypatch
 ) -> None:
     ids, first_id, _ = make_users_and_conversations(test_engine)
     url = f"/ws/conversations/{first_id}"
+    alice_ticket = issue_ticket(websocket_client, ids["alice"])
 
     with websocket_client.websocket_connect(
-        f"{url}?token={create_access_token(ids['alice'])}"
+        url, subprotocols=ticket_protocols(alice_ticket)
     ) as websocket:
         assert websocket.receive_json() == {
             "type": "connection.ready",
             "data": {"conversation_id": first_id, "user_id": ids["alice"]},
         }
 
-    for token in (None, "not-a-jwt", expired_token(ids["alice"]), create_access_token(ids["carol"])):
-        token_query = "" if token is None else f"?token={token}"
+    assert websocket_client.post("/api/v1/auth/websocket-ticket").status_code == 401
+    assert websocket_client.post(
+        "/api/v1/auth/websocket-ticket",
+        headers={"Authorization": "Bearer not-a-jwt"},
+    ).status_code == 401
+    issuance = websocket_client.post(
+        "/api/v1/auth/websocket-ticket",
+        headers={"Authorization": f"Bearer {create_access_token(ids['alice'])}"},
+    )
+    assert issuance.status_code == 200
+    assert set(issuance.json()) == {"ticket", "expires_in"}
+    assert issuance.json()["ticket"] != create_access_token(ids["alice"])
+    assert 1 <= issuance.json()["expires_in"] <= 30
+
+    carol_ticket = issue_ticket(websocket_client, ids["carol"])
+    for offered_protocols in (
+        ticket_protocols(),
+        ticket_protocols("invalid-ticket"),
+        ticket_protocols(carol_ticket),
+    ):
         with pytest.raises(WebSocketDisconnect) as disconnected:
-            with websocket_client.websocket_connect(f"{url}{token_query}"):
+            with websocket_client.websocket_connect(url, subprotocols=offered_protocols):
                 pass
-        assert disconnected.value.code == 4401
+        assert disconnected.value.code in (4401, 4403)
+
+    monkeypatch.setattr(websocket_ticket_store, "ttl_seconds", 0.02)
+    expired_ticket = issue_ticket(websocket_client, ids["alice"])
+    time.sleep(0.04)
+    with pytest.raises(WebSocketDisconnect) as disconnected:
+        with websocket_client.websocket_connect(
+            url, subprotocols=ticket_protocols(expired_ticket)
+        ):
+            pass
+    assert disconnected.value.code == 4401
 
 
 def test_message_is_persisted_and_broadcast_only_in_its_conversation(
     websocket_client, test_engine
 ) -> None:
     ids, first_id, second_id = make_users_and_conversations(test_engine)
+    sender_ticket = issue_ticket(websocket_client, ids["alice"])
+    recipient_ticket = issue_ticket(websocket_client, ids["bob"])
+    unrelated_ticket = issue_ticket(websocket_client, ids["carol"])
     with websocket_client.websocket_connect(
-        f"/ws/conversations/{first_id}?token={create_access_token(ids['alice'])}"
+        f"/ws/conversations/{first_id}", subprotocols=ticket_protocols(sender_ticket)
     ) as sender, websocket_client.websocket_connect(
-        f"/ws/conversations/{first_id}?token={create_access_token(ids['bob'])}"
+        f"/ws/conversations/{first_id}", subprotocols=ticket_protocols(recipient_ticket)
     ) as recipient, websocket_client.websocket_connect(
-        f"/ws/conversations/{second_id}?token={create_access_token(ids['carol'])}"
+        f"/ws/conversations/{second_id}", subprotocols=ticket_protocols(unrelated_ticket)
     ) as unrelated:
         sender.receive_json()
         recipient.receive_json()
@@ -127,7 +171,8 @@ def test_invalid_payloads_are_rejected_and_sender_cannot_be_spoofed(
 ) -> None:
     ids, first_id, _ = make_users_and_conversations(test_engine)
     with websocket_client.websocket_connect(
-        f"/ws/conversations/{first_id}?token={create_access_token(ids['alice'])}"
+        f"/ws/conversations/{first_id}",
+        subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),
     ) as websocket:
         websocket.receive_json()
         for raw_payload in (
@@ -154,8 +199,71 @@ def test_disconnect_removes_connection(websocket_client, test_engine) -> None:
     ids, first_id, _ = make_users_and_conversations(test_engine)
     assert connection_manager.connection_count(first_id, ids["alice"]) == 0
     with websocket_client.websocket_connect(
-        f"/ws/conversations/{first_id}?token={create_access_token(ids['alice'])}"
+        f"/ws/conversations/{first_id}",
+        subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),
     ) as websocket:
         websocket.receive_json()
         assert connection_manager.connection_count(first_id, ids["alice"]) == 1
     assert connection_manager.connection_count(first_id, ids["alice"]) == 0
+
+
+def test_websocket_ticket_is_single_use(websocket_client, test_engine) -> None:
+    ids, first_id, _ = make_users_and_conversations(test_engine)
+    ticket = issue_ticket(websocket_client, ids["alice"])
+    url = f"/ws/conversations/{first_id}"
+    protocols = ticket_protocols(ticket)
+    with websocket_client.websocket_connect(url, subprotocols=protocols) as websocket:
+        assert websocket.receive_json()["type"] == "connection.ready"
+        assert websocket.accepted_subprotocol == WEBSOCKET_SUBPROTOCOL
+    with pytest.raises(WebSocketDisconnect) as disconnected:
+        with websocket_client.websocket_connect(url, subprotocols=protocols):
+            pass
+    assert disconnected.value.code == 4401
+
+
+def test_ticket_consumption_is_atomic_across_threads() -> None:
+    store = WebSocketTicketStore()
+    ticket, _ = store.issue(17, datetime.now(timezone.utc) + timedelta(minutes=1))
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(store.consume, [ticket] * 8))
+    assert sum(result is not None for result in results) == 1
+
+
+def test_websocket_closes_when_main_access_token_expires(
+    websocket_client, test_engine
+) -> None:
+    ids, first_id, _ = make_users_and_conversations(test_engine)
+    now = datetime.now(timezone.utc)
+    short_token = jwt.encode(
+        {
+            "sub": str(ids["alice"]),
+            "iat": now,
+            "exp": now + timedelta(seconds=1.5),
+            "type": "access",
+        },
+        get_jwt_secret_key(),
+        algorithm="HS256",
+    )
+    ticket = issue_ticket(websocket_client, ids["alice"], short_token)
+    with websocket_client.websocket_connect(
+        f"/ws/conversations/{first_id}", subprotocols=ticket_protocols(ticket)
+    ) as websocket:
+        assert websocket.receive_json()["type"] == "connection.ready"
+        time.sleep(1.6)
+        with pytest.raises(WebSocketDisconnect) as disconnected:
+            websocket.receive_json()
+    assert disconnected.value.code == 4408
+    assert connection_manager.connection_count(first_id, ids["alice"]) == 0
+
+
+def test_message_persistence_rejects_expired_authentication(
+    websocket_client, test_engine
+) -> None:
+    ids, first_id, _ = make_users_and_conversations(test_engine)
+    expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with pytest.raises(AuthenticationExpiredError):
+        websocket_routes._persist_message(
+            first_id, ids["alice"], "must not persist", expired_at
+        )
+    with Session(test_engine) as session:
+        assert session.scalars(select(Message)).all() == []

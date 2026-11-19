@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from fastapi import WebSocket
 
@@ -10,16 +11,24 @@ class ConnectionManager:
         self._connections: dict[int, dict[int, set[WebSocket]]] = defaultdict(
             lambda: defaultdict(set)
         )
+        self._expirations: dict[WebSocket, datetime] = {}
 
     async def connect(
-        self, websocket: WebSocket, conversation_id: int, user_id: int
+        self,
+        websocket: WebSocket,
+        conversation_id: int,
+        user_id: int,
+        expires_at: datetime,
+        subprotocol: str,
     ) -> None:
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
         self._connections[conversation_id][user_id].add(websocket)
+        self._expirations[websocket] = expires_at
 
     def disconnect(
         self, websocket: WebSocket, conversation_id: int, user_id: int
     ) -> None:
+        self._expirations.pop(websocket, None)
         users = self._connections.get(conversation_id)
         if users is None:
             return
@@ -31,11 +40,29 @@ class ConnectionManager:
         if not users:
             self._connections.pop(conversation_id, None)
 
+    def is_expired(self, websocket: WebSocket) -> bool:
+        expires_at = self._expirations.get(websocket)
+        return expires_at is None or datetime.now(timezone.utc) >= expires_at
+
+    async def close_if_expired(
+        self, websocket: WebSocket, conversation_id: int, user_id: int
+    ) -> bool:
+        if not self.is_expired(websocket):
+            return False
+        try:
+            await websocket.close(code=4408, reason="Authentication expired.")
+        except Exception:
+            pass
+        self.disconnect(websocket, conversation_id, user_id)
+        return True
+
     async def broadcast(self, conversation_id: int, payload: dict) -> None:
         users = self._connections.get(conversation_id, {})
         stale: list[tuple[int, WebSocket]] = []
         for user_id, sockets in list(users.items()):
             for websocket in list(sockets):
+                if await self.close_if_expired(websocket, conversation_id, user_id):
+                    continue
                 try:
                     await websocket.send_json(payload)
                 except Exception:

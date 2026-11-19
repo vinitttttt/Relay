@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import jwt
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -10,8 +12,14 @@ from app.schemas.auth import (
     LoginRequest,
     RegistrationRequest,
     UserPublic,
+    WebSocketTicketResponse,
 )
-from app.security.tokens import create_access_token
+from app.security.tokens import (
+    InvalidAccessToken,
+    create_access_token,
+    get_access_token_expiration,
+)
+from app.security.websocket_tickets import websocket_ticket_store
 from app.services.auth import (
     DuplicateUserError,
     InvalidCredentialsError,
@@ -20,6 +28,7 @@ from app.services.auth import (
 )
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @router.post(
@@ -72,3 +81,23 @@ def login(
 @router.get("/me", response_model=UserPublic)
 def read_current_user(current_user: User = Depends(get_current_user)) -> User:
     return current_user
+
+
+@router.post("/websocket-ticket", response_model=WebSocketTicketResponse)
+def issue_websocket_ticket(
+    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> WebSocketTicketResponse:
+    """Issue a one-use WebSocket ticket bounded by the current JWT expiry."""
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        ticket, expires_in = websocket_ticket_store.issue(
+            current_user.id,
+            get_access_token_expiration(credentials.credentials),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="WebSocket ticket service unavailable.") from exc
+    except (ValueError, InvalidAccessToken, jwt.InvalidTokenError) as exc:
+        raise HTTPException(status_code=401, detail="Not authenticated") from exc
+    return WebSocketTicketResponse(ticket=ticket, expires_in=expires_in)
