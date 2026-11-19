@@ -6,6 +6,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from app.api.websocket_manager import connection_manager
+from app.core.config import get_allowed_origins, get_rate_limit, get_rate_limit_window_seconds
+from app.core.rate_limit import rate_limiter
 from app.db.session import get_session_factory
 from app.models import User
 from app.schemas.conversations import MessageCreate
@@ -65,6 +67,11 @@ def _persist_message(
 
 @router.websocket("/ws/conversations/{conversation_id}")
 async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> None:
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin.rstrip("/") not in get_allowed_origins():
+        await websocket.close(code=4403, reason="WebSocket origin is not allowed.")
+        return
+
     ticket = websocket_ticket_store.consume(
         ticket_from_subprotocols(websocket.headers.get("sec-websocket-protocol"))
     )
@@ -135,6 +142,22 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                         "data": {
                             "code": "invalid_message",
                             "detail": "Send a message.send event with non-empty content up to 5000 characters.",
+                        },
+                    }
+                )
+                continue
+
+            if not rate_limiter.allow(
+                "websocket_message", str(user_id),
+                get_rate_limit("WEBSOCKET_MESSAGE", 30),
+                get_rate_limit_window_seconds("WEBSOCKET_MESSAGE", 10),
+            ):
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "data": {
+                            "code": "rate_limited",
+                            "detail": "You are sending messages too quickly. Please try again shortly.",
                         },
                     }
                 )

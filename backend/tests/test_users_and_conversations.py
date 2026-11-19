@@ -67,6 +67,19 @@ def test_user_search_requires_authentication(auth_client) -> None:
     assert response.status_code == 401
 
 
+def test_user_search_rate_limit_is_per_authenticated_user(
+    auth_client, test_engine, monkeypatch
+) -> None:
+    ids = seed_users(test_engine, "limited", "other")
+    monkeypatch.setenv("RATE_LIMIT_USER_SEARCH", "1")
+    url = "/api/v1/users/search?q=li"
+    first = auth_client.get(url, headers=auth_headers(ids["limited"]))
+    limited = auth_client.get(url, headers=auth_headers(ids["limited"]))
+    other_user = auth_client.get(url, headers=auth_headers(ids["other"]))
+    assert first.status_code == other_user.status_code == 200
+    assert limited.status_code == 429
+
+
 @pytest.mark.parametrize("query", ["", "a", "  "])
 def test_user_search_rejects_empty_or_short_query(
     auth_client, test_engine, query: str

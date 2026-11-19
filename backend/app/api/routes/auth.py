@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
-from app.core.config import get_access_token_expire_minutes
+from app.core.config import (
+    get_access_token_expire_minutes,
+    get_rate_limit,
+    get_rate_limit_window_seconds,
+)
+from app.core.rate_limit import check_rate_limit
 from app.db.session import get_db
 from app.models import User
 from app.schemas.auth import (
@@ -38,8 +43,15 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 )
 def register(
     payload: RegistrationRequest,
+    request: Request,
     session: Session = Depends(get_db),
 ) -> User:
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(
+        "register", client_ip,
+        get_rate_limit("REGISTER", 5),
+        get_rate_limit_window_seconds("REGISTER", 3600),
+    )
     try:
         return register_user(
             session,
@@ -57,8 +69,17 @@ def register(
 @router.post("/login", response_model=AccessTokenResponse)
 def login(
     payload: LoginRequest,
+    request: Request,
     session: Session = Depends(get_db),
 ) -> AccessTokenResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    login_limit = get_rate_limit("LOGIN", 10)
+    login_window = get_rate_limit_window_seconds("LOGIN", 60)
+    check_rate_limit("login_ip", client_ip, login_limit, login_window)
+    check_rate_limit(
+        "login_identifier", payload.identifier.strip().casefold(),
+        login_limit, login_window,
+    )
     try:
         user = authenticate_user(
             session,

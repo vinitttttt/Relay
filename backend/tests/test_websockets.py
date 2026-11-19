@@ -198,6 +198,26 @@ def test_invalid_payloads_are_rejected_and_sender_cannot_be_spoofed(
 def test_disconnect_removes_connection(websocket_client, test_engine) -> None:
     ids, first_id, _ = make_users_and_conversations(test_engine)
     assert connection_manager.connection_count(first_id, ids["alice"]) == 0
+
+
+def test_websocket_message_rate_limit_is_per_user_and_keeps_connection(
+    websocket_client, test_engine, monkeypatch
+) -> None:
+    ids, first_id, _ = make_users_and_conversations(test_engine)
+    monkeypatch.setenv("RATE_LIMIT_WEBSOCKET_MESSAGE", "1")
+    with websocket_client.websocket_connect(
+        f"/ws/conversations/{first_id}",
+        subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),
+    ) as websocket:
+        assert websocket.receive_json()["type"] == "connection.ready"
+        websocket.send_json({"type": "message.send", "content": "first"})
+        assert websocket.receive_json()["type"] == "message.created"
+        websocket.send_json({"type": "message.send", "content": "second"})
+        limited = websocket.receive_json()
+        assert limited["type"] == "error"
+        assert limited["data"]["code"] == "rate_limited"
+        websocket.send_text("not json")
+        assert websocket.receive_json()["data"]["code"] == "invalid_message"
     with websocket_client.websocket_connect(
         f"/ws/conversations/{first_id}",
         subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),

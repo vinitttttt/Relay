@@ -66,7 +66,22 @@ Emails are trimmed and normalized to lowercase. Passwords are hashed with Argon2
 
 `JWT_SECRET_KEY` is required for token creation and must be at least 32 bytes. `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` controls access-token lifetime and defaults to 30 minutes. Tokens use HS256 and are checked for signature, expiration, token type, and an existing user.
 
-The frontend obtains a short-lived, single-use WebSocket ticket through `POST /api/v1/auth/websocket-ticket`. The WebSocket endpoint consumes the ticket and binds the connection lifetime to the authenticated JWT expiration. Tickets and active connection state are stored in process memory. This is suitable only for a single backend process; multiple workers or replicas need a shared ticket store and cross-process WebSocket broadcast mechanism.
+The frontend obtains a short-lived, single-use WebSocket ticket through `POST /api/v1/auth/websocket-ticket`. The WebSocket endpoint consumes the ticket and binds the connection lifetime to the authenticated JWT expiration. Tickets, active connection state, and rate-limit windows are stored in process memory. They reset on restart and are not shared across multiple workers or replicas; run a single backend process for this MVP. Multi-worker deployment needs shared ticket/rate-limit storage and cross-process WebSocket broadcast.
+
+### Rate limits and browser origins
+
+The in-memory sliding-window limiter has bounded tracking (at most 20,000 active identity buckets). Defaults can be changed in `.env`:
+
+| Environment variables | Default | Applies to |
+| --- | --- | --- |
+| `RATE_LIMIT_LOGIN`, `RATE_LIMIT_LOGIN_WINDOW_SECONDS` | 10 per 60 seconds | Login, independently keyed by client IP and normalized identifier |
+| `RATE_LIMIT_REGISTER`, `RATE_LIMIT_REGISTER_WINDOW_SECONDS` | 5 per 3,600 seconds | Registration, keyed by client IP |
+| `RATE_LIMIT_USER_SEARCH`, `RATE_LIMIT_USER_SEARCH_WINDOW_SECONDS` | 60 per 60 seconds | Username searches, keyed by authenticated user ID |
+| `RATE_LIMIT_WEBSOCKET_MESSAGE`, `RATE_LIMIT_WEBSOCKET_MESSAGE_WINDOW_SECONDS` | 30 per 10 seconds | WebSocket submissions, keyed by authenticated user ID across conversations |
+
+REST limits return HTTP 429 with a `Retry-After` header. WebSocket excess submissions receive an `error` event with code `rate_limited`; the connection remains open. No request payload, credential, or message content is logged by the limiter.
+
+`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact frontend origins. Its local defaults are `http://localhost:5173,http://127.0.0.1:5173`. Credentials are enabled only with explicit origins; wildcard origins are rejected. Browser WebSocket connections use the same explicit allowlist when an `Origin` header is present; clients without an Origin header are accepted after ticket authentication. A same-origin reverse proxy can avoid cross-origin CORS configuration entirely.
 
 For deployment, serve the frontend and API on the same origin or configure a strict CORS allowlist at FastAPI or the reverse proxy. The reverse proxy must forward WebSocket upgrades from `/ws` and use WSS when serving the site over HTTPS. Do not log the `Sec-WebSocket-Protocol` request header because it carries the temporary ticket.
 

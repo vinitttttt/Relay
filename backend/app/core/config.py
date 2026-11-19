@@ -50,3 +50,38 @@ def get_access_token_expire_minutes() -> int:
     if expiration < 1:
         raise RuntimeError("JWT_ACCESS_TOKEN_EXPIRE_MINUTES must be positive.")
     return expiration
+
+
+def get_rate_limit(name: str, default: int) -> int:
+    """Read and validate one request-count limit from the environment."""
+    variable = f"RATE_LIMIT_{name.upper()}"
+    try:
+        value = int(os.getenv(variable, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{variable} must be a positive integer.") from exc
+    if value < 1:
+        raise RuntimeError(f"{variable} must be a positive integer.")
+    return value
+
+
+def get_rate_limit_window_seconds(name: str, default: int) -> int:
+    variable = f"RATE_LIMIT_{name.upper()}_WINDOW_SECONDS"
+    try:
+        value = int(os.getenv(variable, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{variable} must be a positive integer.") from exc
+    if value < 1:
+        raise RuntimeError(f"{variable} must be a positive integer.")
+    return value
+
+
+def get_allowed_origins() -> list[str]:
+    """Return a strict, comma-separated CORS and browser WebSocket allowlist."""
+    configured = os.getenv("CORS_ALLOWED_ORIGINS")
+    raw_origins = configured.split(",") if configured is not None else [
+        "http://localhost:5173", "http://127.0.0.1:5173"
+    ]
+    origins = list(dict.fromkeys(origin.strip().rstrip("/") for origin in raw_origins if origin.strip()))
+    if not origins or "*" in origins:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS must contain explicit origins, not '*'.")
+    return origins

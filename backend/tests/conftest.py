@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.db.base import Base
 from app.db.session import create_database_engine
 from app.main import app
+from app.core.rate_limit import rate_limiter
 from app.models import Conversation, ConversationMember, Message, User  # noqa: F401
 
 
@@ -36,6 +37,7 @@ def test_session(test_engine: Engine) -> Generator[Session, None, None]:
 
 @pytest.fixture
 def auth_client(test_engine: Engine, monkeypatch) -> Generator[TestClient, None, None]:
+    rate_limiter.reset()
     monkeypatch.setenv("JWT_SECRET_KEY", secrets.token_urlsafe(48))
     monkeypatch.setenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "15")
 
@@ -49,3 +51,4 @@ def auth_client(test_engine: Engine, monkeypatch) -> Generator[TestClient, None,
             yield client
     finally:
         app.dependency_overrides.pop(get_db, None)
+        rate_limiter.reset()

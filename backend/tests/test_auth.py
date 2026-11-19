@@ -72,6 +72,18 @@ def test_registration_validation_rejects_invalid_input(auth_client) -> None:
     assert response.status_code == 422
 
 
+def test_registration_rate_limit_returns_429(auth_client, monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_REGISTER", "1")
+    first = auth_client.post("/api/v1/auth/register", json=registration_payload())
+    second = auth_client.post(
+        "/api/v1/auth/register",
+        json=registration_payload(username="second", email="second@example.com", password="another valid password"),
+    )
+    assert first.status_code == 201
+    assert second.status_code == 429
+    assert second.headers["retry-after"] == "3600"
+
+
 def test_password_hashing_uses_argon2_and_verifies_password() -> None:
     password_hash = hash_password("a long test password")
 
@@ -112,6 +124,18 @@ def test_login_does_not_disclose_unknown_account(auth_client) -> None:
 
     assert wrong_password.status_code == unknown_user.status_code == 401
     assert wrong_password.json() == unknown_user.json()
+
+
+def test_login_rate_limit_returns_429(auth_client, monkeypatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_LOGIN", "1")
+    first = auth_client.post(
+        "/api/v1/auth/login", json={"identifier": "missing", "password": "bad password"}
+    )
+    second = auth_client.post(
+        "/api/v1/auth/login", json={"identifier": "missing", "password": "bad password"}
+    )
+    assert first.status_code == 401
+    assert second.status_code == 429
 
 
 def test_profile_requires_authentication_and_returns_public_fields(auth_client) -> None:
