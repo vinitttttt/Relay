@@ -308,10 +308,64 @@ def test_message_create_validation_membership_and_response(auth_client, test_eng
     assert sent.json()["content"] == "  Hello Relay!  "
     assert sent.json()["conversation_id"] == conversation["id"]
     assert sent.json()["sender"] == {"id": ids["alice"], "username": "alice"}
+    assert sent.json()["client_message_id"] is None
     assert "email" not in str(sent.json()) and "hashed_password" not in str(sent.json())
     assert auth_client.post(url, json={"content": "   "}, headers=auth_headers(ids["alice"])).status_code == 422
     assert auth_client.post(url, json={"content": "x" * 5001}, headers=auth_headers(ids["alice"])).status_code == 422
     assert auth_client.post(url, json={"content": "Intrusion"}, headers=auth_headers(ids["outsider"])).status_code == 404
+
+
+def test_rest_message_retry_is_idempotent_and_conflicting_content_is_rejected(
+    auth_client, test_engine
+) -> None:
+    ids = seed_users(test_engine, "sender", "recipient", "other")
+    conversation = auth_client.post(
+        "/api/v1/conversations/direct", json={"target_user_id": ids["recipient"]},
+        headers=auth_headers(ids["sender"]),
+    ).json()
+    url = f"/api/v1/conversations/{conversation['id']}/messages"
+    body = {"content": "exactly once", "client_message_id": "message-001"}
+    first = auth_client.post(url, json=body, headers=auth_headers(ids["sender"]))
+    retry = auth_client.post(url, json=body, headers=auth_headers(ids["sender"]))
+    conflict = auth_client.post(
+        url,
+        json={**body, "content": "different"},
+        headers=auth_headers(ids["sender"]),
+    )
+    other_sender = auth_client.post(url, json=body, headers=auth_headers(ids["recipient"]))
+
+    assert first.status_code == 201
+    assert retry.status_code == 200
+    assert first.json() == retry.json()
+    assert first.json()["client_message_id"] == "message-001"
+    assert conflict.status_code == 409
+    assert other_sender.status_code == 201
+    with Session(test_engine) as session:
+        assert session.scalar(select(func.count(Message.id))) == 2
+
+
+def test_client_message_id_is_scoped_to_conversation(auth_client, test_engine) -> None:
+    ids = seed_users(test_engine, "first", "second", "third")
+    first_headers = auth_headers(ids["first"])
+    first_conversation = auth_client.post(
+        "/api/v1/conversations/direct", json={"target_user_id": ids["second"]},
+        headers=first_headers,
+    ).json()
+    second_conversation = auth_client.post(
+        "/api/v1/conversations/direct", json={"target_user_id": ids["third"]},
+        headers=first_headers,
+    ).json()
+    body = {"content": "same client id", "client_message_id": "scoped-id"}
+    first = auth_client.post(
+        f"/api/v1/conversations/{first_conversation['id']}/messages",
+        json=body, headers=first_headers,
+    )
+    second = auth_client.post(
+        f"/api/v1/conversations/{second_conversation['id']}/messages",
+        json=body, headers=first_headers,
+    )
+    assert first.status_code == second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
 
 
 def test_message_history_is_chronological_and_paginated(auth_client, test_engine) -> None:
@@ -338,6 +392,38 @@ def test_message_history_is_chronological_and_paginated(auth_client, test_engine
     assert [item["content"] for item in last.json()["items"]] == ["message 0"]
     assert last.json()["next_cursor"] is None
     assert auth_client.get(url, headers=auth_headers(ids["outsider"])).status_code == 404
+
+
+def test_message_after_id_pagination_is_chronological_and_independent(
+    auth_client, test_engine
+) -> None:
+    ids = seed_users(test_engine, "alice", "bob")
+    conversation = auth_client.post(
+        "/api/v1/conversations/direct", json={"target_user_id": ids["bob"]},
+        headers=auth_headers(ids["alice"]),
+    ).json()
+    url = f"/api/v1/conversations/{conversation['id']}/messages"
+    headers = auth_headers(ids["alice"])
+    with Session(test_engine) as session:
+        session.add_all([
+            Message(conversation_id=conversation["id"], sender_id=ids["alice"], content=f"page {index}")
+            for index in range(5)
+        ])
+        session.commit()
+        message_ids = session.scalars(select(Message.id).order_by(Message.id)).all()
+    first_page = auth_client.get(url, params={"after_id": message_ids[0], "limit": 2}, headers=headers)
+    assert [item["content"] for item in first_page.json()["items"]] == ["page 1", "page 2"]
+    assert first_page.json()["next_cursor"] == message_ids[2]
+    second_page = auth_client.get(
+        url,
+        params={"after_id": first_page.json()["next_cursor"], "limit": 2},
+        headers=headers,
+    )
+    assert [item["content"] for item in second_page.json()["items"]] == ["page 3", "page 4"]
+    assert second_page.json()["next_cursor"] is None
+    assert auth_client.get(
+        url, params={"after_id": 0, "before_id": message_ids[-1]}, headers=headers
+    ).status_code == 422
 
 
 def test_conversation_list_handles_no_messages_and_requires_auth(auth_client, test_engine) -> None:

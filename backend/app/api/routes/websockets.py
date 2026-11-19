@@ -20,6 +20,7 @@ from app.security.websocket_tickets import (
 from app.services.conversations import (
     AuthenticationExpiredError,
     ConversationAccessError,
+    MessageIdempotencyConflictError,
     create_message,
     get_conversation_user,
 )
@@ -40,17 +41,19 @@ def _persist_message(
     user_id: int,
     content: str,
     authentication_expires_at: datetime,
-) -> dict:
+    client_message_id: str | None = None,
+) -> tuple[dict, bool]:
     with get_session_factory()() as session:
         user = session.get(User, user_id)
         if user is None:
             raise ConversationAccessError
-        message = create_message(
+        message, created = create_message(
             session,
             conversation_id,
             user,
             content,
             authentication_expires_at=authentication_expires_at,
+            client_message_id=client_message_id,
         )
         return {
             "type": "message.created",
@@ -60,9 +63,10 @@ def _persist_message(
                 "sender_id": user.id,
                 "sender_username": user.username,
                 "content": message.content,
+                "client_message_id": message.client_message_id,
                 "created_at": message.created_at.isoformat(),
             },
-        }
+        }, created
 
 
 @router.websocket("/ws/conversations/{conversation_id}")
@@ -128,6 +132,7 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
             except WebSocketDisconnect:
                 raise
 
+            request = None
             try:
                 if await connection_manager.close_if_expired(
                     websocket, conversation_id, user_id
@@ -141,6 +146,7 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                         "type": "error",
                         "data": {
                             "code": "invalid_message",
+                            "client_message_id": getattr(request, "client_message_id", None),
                             "detail": "Send a message.send event with non-empty content up to 5000 characters.",
                         },
                     }
@@ -157,6 +163,7 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                         "type": "error",
                         "data": {
                             "code": "rate_limited",
+                            "client_message_id": request.client_message_id,
                             "detail": "You are sending messages too quickly. Please try again shortly.",
                         },
                     }
@@ -164,29 +171,46 @@ async def conversation_websocket(websocket: WebSocket, conversation_id: int) -> 
                 continue
 
             try:
-                event = _persist_message(
+                event, created = _persist_message(
                     conversation_id,
                     user_id,
                     message_request.content,
                     ticket.authentication_expires_at,
+                    request.client_message_id,
                 )
             except AuthenticationExpiredError:
                 await connection_manager.close_if_expired(
                     websocket, conversation_id, user_id
                 )
                 return
+            except MessageIdempotencyConflictError:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "data": {
+                            "code": "idempotency_conflict",
+                            "client_message_id": request.client_message_id,
+                            "detail": "client_message_id was already used with different message content.",
+                        },
+                    }
+                )
+                continue
             except Exception:
                 await websocket.send_json(
                     {
                         "type": "error",
                         "data": {
                             "code": "message_not_saved",
+                            "client_message_id": request.client_message_id,
                             "detail": "The message could not be saved.",
                         },
                     }
                 )
                 continue
-            await connection_manager.broadcast(conversation_id, event)
+            if created:
+                await connection_manager.broadcast(conversation_id, event)
+            else:
+                await websocket.send_json(event)
     except WebSocketDisconnect:
         pass
     finally:

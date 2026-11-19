@@ -62,6 +62,8 @@ The API is available at <http://localhost:8000>; interactive documentation is at
 - `POST /api/v1/auth/login` accepts `identifier` (username or email) and `password`, and returns a bearer access token.
 - `GET /api/v1/auth/me` returns the current user's public profile and requires `Authorization: Bearer <access_token>`.
 
+Message creation accepts an optional client generated `client_message_id`. Relay stores it uniquely per sender and conversation, returns the existing message for an identical retry, and reports a conflict if the same ID is reused with different content. New clients send this ID over either REST or WebSocket; REST history supports both older `before_id` pages and forward `after_id` pages for reconnect recovery.
+
 Emails are trimmed and normalized to lowercase. Passwords are hashed with Argon2 before storage. Login failures use the same response for unknown accounts and incorrect passwords. Public responses never include password hashes.
 
 `JWT_SECRET_KEY` is required for token creation and must be at least 32 bytes. `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` controls access-token lifetime and defaults to 30 minutes. Tokens use HS256 and are checked for signature, expiration, token type, and an existing user.

@@ -23,6 +23,10 @@ class AuthenticationExpiredError(Exception):
     """Raised when a WebSocket session expires before message commit."""
 
 
+class MessageIdempotencyConflictError(Exception):
+    """Raised when a client message ID is retried with different content."""
+
+
 def get_conversation_user(
     session: Session, conversation_id: int, user_id: int
 ) -> User:
@@ -100,29 +104,80 @@ def create_message(
     user: User,
     content: str,
     authentication_expires_at: datetime | None = None,
-) -> Message:
+    client_message_id: str | None = None,
+) -> tuple[Message, bool]:
     if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
         raise AuthenticationExpiredError
     _require_membership(session, conversation_id, user.id)
+    if client_message_id is not None:
+        existing = session.scalar(
+            select(Message).options(selectinload(Message.sender)).where(
+                Message.conversation_id == conversation_id,
+                Message.sender_id == user.id,
+                Message.client_message_id == client_message_id,
+            )
+        )
+        if existing is not None:
+            if existing.content != content:
+                raise MessageIdempotencyConflictError
+            return existing, False
     if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
         raise AuthenticationExpiredError
-    message = Message(conversation_id=conversation_id, sender_id=user.id, content=content)
+    message = Message(
+        conversation_id=conversation_id,
+        sender_id=user.id,
+        content=content,
+        client_message_id=client_message_id,
+    )
     session.add(message)
     if authentication_expires_at is not None and datetime.now(timezone.utc) >= authentication_expires_at:
         session.rollback()
         raise AuthenticationExpiredError
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if client_message_id is None:
+            raise
+        existing = session.scalar(
+            select(Message).options(selectinload(Message.sender)).where(
+                Message.conversation_id == conversation_id,
+                Message.sender_id == user.id,
+                Message.client_message_id == client_message_id,
+            )
+        )
+        if existing is None:
+            raise
+        if existing.content != content:
+            raise MessageIdempotencyConflictError
+        return existing, False
     session.refresh(message)
-    return message
+    return message, True
 
 
 def get_message_page(
-    session: Session, conversation_id: int, user_id: int, limit: int, before_id: int | None
+    session: Session,
+    conversation_id: int,
+    user_id: int,
+    limit: int,
+    before_id: int | None,
+    after_id: int | None = None,
 ):
     _require_membership(session, conversation_id, user_id)
     statement = select(Message).where(Message.conversation_id == conversation_id)
     if before_id is not None:
         statement = statement.where(Message.id < before_id)
+    if after_id is not None:
+        statement = statement.where(Message.id > after_id)
+        rows = session.scalars(
+            statement.options(selectinload(Message.sender))
+            .order_by(Message.id.asc())
+            .limit(limit + 1)
+        ).all()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        next_cursor = page[-1].id if has_more and page else None
+        return page, next_cursor
     rows = session.scalars(
         statement.options(selectinload(Message.sender))
         .order_by(Message.id.desc())

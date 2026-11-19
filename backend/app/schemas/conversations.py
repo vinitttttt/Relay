@@ -21,6 +21,7 @@ class DirectConversationResponse(BaseModel):
 
 
 class MessageCreate(BaseModel):
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=100)
     content: str = Field(min_length=1, max_length=5000)
 
     @field_validator("content")
@@ -37,6 +38,7 @@ class MessageResponse(BaseModel):
     id: int
     conversation_id: int
     content: str
+    client_message_id: str | None
     created_at: datetime
     sender: UserSearchResult
 

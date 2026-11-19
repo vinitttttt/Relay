@@ -1,42 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createTicketedWebSocket } from '../auth/api.js'
-
-const PAGE_SIZE = 50
+import {
+  createClientMessageId,
+  getClientMessageId,
+  latestConfirmedMessageId,
+  mergeMessages,
+  MESSAGE_PAGE_SIZE,
+  recoverMessagesAfter,
+} from './messageReliability.js'
 
 function formatMessageTime(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date)
-}
-
-function mergeMessages(current, incoming) {
-  const byId = new Map(current.map((message) => [message.id, message]))
-  incoming.forEach((message) => byId.set(message.id, { ...byId.get(message.id), ...message }))
-  return [...byId.values()].sort((a, b) => {
-    const timeDifference = new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    if (timeDifference) return timeDifference
-    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
-  })
-}
-
-function findPending(pending, content) {
-  for (const [id, item] of pending) if (item.content === content) return id
-  return null
-}
-
-function reconcilePending(messages, pending, userId) {
-  const remaining = [...pending.entries()]
-  const confirmedIds = new Set()
-  messages.forEach((message) => {
-    if (message.sender?.id !== userId) return
-    const matchIndex = remaining.findIndex(([, item]) => item.content === message.content)
-    if (matchIndex !== -1) {
-      confirmedIds.add(remaining[matchIndex][0])
-      remaining.splice(matchIndex, 1)
-    }
-  })
-  confirmedIds.forEach((id) => pending.delete(id))
-  return messages.filter((message) => !confirmedIds.has(message.id))
 }
 
 export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMessage }) {
@@ -59,6 +35,7 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
   const mountedRef = useRef(false)
   const socketRef = useRef(null)
   const pendingRef = useRef(new Map())
+  const latestConfirmedIdRef = useRef(0)
   const updateConnectionStatus = useCallback((status) => {
     setConnectionStatus(status)
   }, [])
@@ -68,10 +45,18 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
     let active = true
     setLoading(true)
     setHistoryError('')
-    apiFetch(`/api/v1/conversations/${conversation.id}/messages?limit=${PAGE_SIZE}`)
+    apiFetch(`/api/v1/conversations/${conversation.id}/messages?limit=${MESSAGE_PAGE_SIZE}`)
       .then((page) => {
         if (!active) return
-        setMessages((current) => mergeMessages(current, Array.isArray(page?.items) ? page.items : []))
+        const initialMessages = Array.isArray(page?.items) ? page.items : []
+        setMessages((current) => {
+          const merged = mergeMessages(current, initialMessages)
+          latestConfirmedIdRef.current = Math.max(
+            latestConfirmedIdRef.current,
+            latestConfirmedMessageId(merged),
+          )
+          return merged
+        })
         setNextCursor(page?.next_cursor ?? null)
         bottomRequestedRef.current = true
       })
@@ -87,15 +72,49 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
     let socket = null
     let attempts = 0
     let reconnecting = false
-    const recoverLatest = async () => {
+    const resendPending = () => {
+      const activeSocket = socketRef.current
+      if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) return
+      pendingRef.current.forEach((pending, clientMessageId) => {
+        pending.sent = true
+        setMessages((current) => current.map((item) =>
+          item.id === pending.localId ? { ...item, delivery: 'sending' } : item,
+        ))
+        try {
+          activeSocket.send(JSON.stringify({
+            type: 'message.send',
+            client_message_id: clientMessageId,
+            content: pending.content,
+          }))
+        } catch { /* The next socket close will schedule another attempt. */ }
+      })
+    }
+    const recoverAfterCursor = async () => {
       try {
-        const page = await apiFetch(`/api/v1/conversations/${conversation.id}/messages?limit=${PAGE_SIZE}`)
+        const recovered = await recoverMessagesAfter(
+          apiFetch,
+          conversation.id,
+          latestConfirmedIdRef.current,
+          MESSAGE_PAGE_SIZE,
+        )
         if (!stopped && mountedRef.current) {
-          const recovered = Array.isArray(page?.items) ? page.items : []
-          setMessages((current) => reconcilePending(mergeMessages(current, recovered), pendingRef.current, user.id))
-          if (recovered.length) onMessage?.(conversation.id, recovered[recovered.length - 1])
+          recovered.forEach((message) => {
+            if (message.sender?.id === user.id && message.client_message_id) {
+              pendingRef.current.delete(message.client_message_id)
+            }
+            onMessage?.(conversation.id, message)
+          })
+          setMessages((current) => {
+            const merged = mergeMessages(current, recovered)
+            latestConfirmedIdRef.current = Math.max(
+              latestConfirmedIdRef.current,
+              latestConfirmedMessageId(merged),
+            )
+            return merged
+          })
         }
       } catch { /* The next reconnect or normal history retry can recover it. */ }
+      finally { resendPending() }
     }
     const connect = async () => {
       if (stopped) return
@@ -121,7 +140,7 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
         updateConnectionStatus('connected')
         if (stableTimer) window.clearTimeout(stableTimer)
         stableTimer = window.setTimeout(() => { attempts = 0 }, 30000)
-        if (reconnecting) recoverLatest()
+        if (reconnecting) recoverAfterCursor()
         reconnecting = false
       }
       socket.onmessage = (event) => {
@@ -139,24 +158,24 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
             id: data.id,
             conversation_id: data.conversation_id,
             content: data.content,
+            client_message_id: data.client_message_id ?? null,
             created_at: data.created_at,
             sender: { id: data.sender_id, username: data.sender_username },
           }
-          onMessage?.(conversation.id, message)
-          if (data.sender_id === user.id) {
-            const pendingId = findPending(pendingRef.current, data.content)
-            if (pendingId) pendingRef.current.delete(pendingId)
-            setMessages((current) => mergeMessages(current.filter((item) => item.id !== pendingId), [message]))
-          } else {
-            setMessages((current) => mergeMessages(current, [message]))
+          if (message.sender.id === user.id && message.client_message_id) {
+            pendingRef.current.delete(message.client_message_id)
           }
+          latestConfirmedIdRef.current = Math.max(latestConfirmedIdRef.current, Number(message.id))
+          onMessage?.(conversation.id, message)
+          setMessages((current) => mergeMessages(current, [message]))
           return
         }
         if (payload?.type === 'error') {
-          const pendingId = [...pendingRef.current.keys()][0]
-          if (pendingId) {
-            pendingRef.current.delete(pendingId)
-            setMessages((current) => current.map((item) => item.id === pendingId ? { ...item, delivery: 'failed', deliveryMessage: payload.data?.detail || 'The server rejected this message.' } : item))
+          const clientMessageId = payload.data?.client_message_id
+          const pendingMessage = clientMessageId ? pendingRef.current.get(clientMessageId) : null
+          if (pendingMessage) {
+            pendingRef.current.delete(clientMessageId)
+            setMessages((current) => current.map((item) => item.id === pendingMessage.localId ? { ...item, delivery: 'failed', deliveryMessage: payload.data?.detail || 'The server rejected this message.' } : item))
             setSendError(payload.data?.detail || 'The server rejected this message.')
           }
         }
@@ -168,8 +187,8 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
           updateConnectionStatus('disconnected')
           return
         }
-        pendingRef.current.forEach((pending, id) => {
-          if (pending.sent) setMessages((current) => current.map((item) => item.id === id ? { ...item, delivery: 'unknown' } : item))
+        pendingRef.current.forEach((pending) => {
+          if (pending.sent) setMessages((current) => current.map((item) => item.id === pending.localId ? { ...item, delivery: 'unknown' } : item))
         })
         scheduleReconnect()
       }
@@ -223,7 +242,7 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
     const container = scrollRef.current
     if (container) preserveScrollRef.current = { top: container.scrollTop, height: container.scrollHeight }
     try {
-      const page = await apiFetch(`/api/v1/conversations/${conversation.id}/messages?limit=${PAGE_SIZE}&before_id=${nextCursor}`)
+      const page = await apiFetch(`/api/v1/conversations/${conversation.id}/messages?limit=${MESSAGE_PAGE_SIZE}&before_id=${nextCursor}`)
       if (!mountedRef.current) return
       setMessages((current) => mergeMessages(current, Array.isArray(page?.items) ? page.items : []))
       setNextCursor(page?.next_cursor ?? null)
@@ -244,20 +263,22 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
     nearBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 96
   }
 
-  async function sendMessage(content = draft, retryId = null) {
+  async function sendMessage(content = draft, retryClientId = null, retryLocalId = null) {
     const messageContent = content
     if (!messageContent.trim() || messageContent.length > 5000 || sendingRef.current) return
     sendingRef.current = true
     setSending(true)
     setSendError('')
     bottomRequestedRef.current = true
-    let localId = retryId
+    const clientMessageId = retryClientId || createClientMessageId()
+    let localId = retryLocalId
     if (!localId) {
-      localId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      localId = `pending-${clientMessageId}`
       setMessages((current) => mergeMessages(current, [{
         id: localId,
         conversation_id: conversation.id,
         content: messageContent,
+        client_message_id: clientMessageId,
         created_at: new Date().toISOString(),
         sender: { id: user.id, username: user.username },
         delivery: 'sending',
@@ -265,23 +286,25 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
     } else {
       setMessages((current) => current.map((message) => message.id === localId ? { ...message, delivery: 'sending' } : message))
     }
+    pendingRef.current.set(clientMessageId, { content: messageContent, localId, sent: false })
     try {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        // REST fallback is safe only before anything was handed to a WebSocket.
-        const saved = await apiFetch(`/api/v1/conversations/${conversation.id}/messages`, { method: 'POST', body: JSON.stringify({ content: messageContent }) })
+        const saved = await apiFetch(`/api/v1/conversations/${conversation.id}/messages`, { method: 'POST', body: JSON.stringify({ content: messageContent, client_message_id: clientMessageId }) })
         if (!mountedRef.current) return
-        setMessages((current) => mergeMessages(current.filter((message) => message.id !== localId), [saved]))
+        pendingRef.current.delete(clientMessageId)
+        latestConfirmedIdRef.current = Math.max(latestConfirmedIdRef.current, Number(saved.id))
+        setMessages((current) => mergeMessages(current, [saved]))
         onMessage?.(conversation.id, saved)
       } else {
-        pendingRef.current.set(localId, { content: messageContent, sent: true })
-        socket.send(JSON.stringify({ type: 'message.send', content: messageContent }))
+        pendingRef.current.set(clientMessageId, { content: messageContent, localId, sent: true })
+        socket.send(JSON.stringify({ type: 'message.send', client_message_id: clientMessageId, content: messageContent }))
         setDraft((current) => current === messageContent ? '' : current)
       }
       setDraft((current) => current === messageContent ? '' : current)
     } catch (error) {
       if (!mountedRef.current) return
-      const ambiguous = pendingRef.current.has(localId)
+      const ambiguous = pendingRef.current.get(clientMessageId)?.sent
       setMessages((current) => current.map((message) => message.id === localId ? { ...message, delivery: ambiguous ? 'unknown' : 'failed' } : message))
       setSendError(error.message)
     } finally {
@@ -312,7 +335,7 @@ export function ChatWindow({ conversation, title, user, apiFetch, onBack, onMess
         {loading && <div className="message-state"><span className="mini-spinner" />Loading messages</div>}
         {!loading && historyError && messages.length === 0 && <div className="message-state message-error"><p>{historyError}</p><button type="button" onClick={() => setReloadKey((value) => value + 1)}>Try again</button></div>}
         {!loading && !historyError && messages.length === 0 && <div className="message-state"><span className="empty-chat-icon"><MessageIcon /></span><p>No messages yet</p><span>Send the first message to get the conversation started.</span></div>}
-        {!loading && messages.map((message) => <MessageBubble key={message.id} message={message} outgoing={message.sender?.id === user.id} onRetry={() => sendMessage(message.content, message.id)} retryDisabled={sending} />)}
+        {!loading && messages.map((message) => <MessageBubble key={message.id} message={message} outgoing={message.sender?.id === user.id} onRetry={() => sendMessage(message.content, getClientMessageId(message), message.id)} retryDisabled={sending} />)}
         {!loading && historyError && messages.length > 0 && <div className="inline-history-error" role="alert">{historyError}</div>}
       </div>
       <MessageComposer draft={draft} onDraftChange={setDraft} onKeyDown={handleComposerKeyDown} onSend={() => sendMessage()} canSend={canSend} sending={sending} sendError={sendError} />

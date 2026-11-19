@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -11,6 +11,11 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_conversation_created_at", "conversation_id", "created_at"),
         Index("ix_messages_sender_id", "sender_id"),
+        Index(
+            "uq_messages_sender_conversation_client_id",
+            "conversation_id", "sender_id", "client_message_id",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -21,6 +26,7 @@ class Message(Base):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    client_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )

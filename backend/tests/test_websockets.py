@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import AsyncMock
 
 import jwt
 import pytest
@@ -140,7 +141,7 @@ def test_message_is_persisted_and_broadcast_only_in_its_conversation(
         sender.receive_json()
         recipient.receive_json()
         unrelated.receive_json()
-        sender.send_json({"type": "message.send", "content": "Hello in room one"})
+        sender.send_json({"type": "message.send", "client_message_id": "room-one-1", "content": "Hello in room one"})
         delivered = recipient.receive_json()
         assert delivered["type"] == "message.created"
         assert delivered["data"] == {
@@ -149,11 +150,12 @@ def test_message_is_persisted_and_broadcast_only_in_its_conversation(
             "sender_id": ids["alice"],
             "sender_username": "alice",
             "content": "Hello in room one",
+            "client_message_id": "room-one-1",
             "created_at": delivered["data"]["created_at"],
         }
         assert sender.receive_json() == delivered
 
-        unrelated.send_json({"type": "message.send", "content": "Room two message"})
+        unrelated.send_json({"type": "message.send", "client_message_id": "room-two-1", "content": "Room two message"})
         second_event = unrelated.receive_json()
         assert second_event["data"]["conversation_id"] == second_id
         assert second_event["data"]["content"] == "Room two message"
@@ -164,6 +166,58 @@ def test_message_is_persisted_and_broadcast_only_in_its_conversation(
             (first_id, ids["alice"], "Hello in room one"),
             (second_id, ids["carol"], "Room two message"),
         ]
+
+
+def test_websocket_retries_are_idempotent_and_match_rest_rules(
+    websocket_client, test_engine, monkeypatch
+) -> None:
+    ids, first_id, _ = make_users_and_conversations(test_engine)
+    body = {"content": "one saved message", "client_message_id": "ws-retry-1"}
+    rest_saved = websocket_client.post(
+        f"/api/v1/conversations/{first_id}/messages",
+        json=body,
+        headers={"Authorization": f"Bearer {create_access_token(ids['alice'])}"},
+    )
+    original_broadcast = connection_manager.broadcast
+    broadcast_spy = AsyncMock(wraps=original_broadcast)
+    monkeypatch.setattr(connection_manager, "broadcast", broadcast_spy)
+    with websocket_client.websocket_connect(
+        f"/ws/conversations/{first_id}",
+        subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),
+    ) as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "message.send", **body})
+        duplicate = websocket.receive_json()
+        assert duplicate["type"] == "message.created"
+        assert duplicate["data"]["id"] == rest_saved.json()["id"]
+        assert duplicate["data"]["client_message_id"] == body["client_message_id"]
+        websocket.send_json({
+            "type": "message.send",
+            "client_message_id": "ws-own-retry",
+            "content": "created over websocket",
+        })
+        first_websocket_save = websocket.receive_json()
+        websocket.send_json({
+            "type": "message.send",
+            "client_message_id": "ws-own-retry",
+            "content": "created over websocket",
+        })
+        websocket_retry = websocket.receive_json()
+        assert websocket_retry == first_websocket_save
+        websocket.send_json({"type": "message.send", **body, "content": "changed"})
+        conflict = websocket.receive_json()
+        assert conflict["type"] == "error"
+        assert conflict["data"]["code"] == "idempotency_conflict"
+        assert conflict["data"]["client_message_id"] == body["client_message_id"]
+
+    assert broadcast_spy.await_count == 1
+
+    with Session(test_engine) as session:
+        saved = session.scalars(select(Message)).all()
+        assert len(saved) == 2
+        assert {message.content for message in saved} == {
+            "one saved message", "created over websocket"
+        }
 
 
 def test_invalid_payloads_are_rejected_and_sender_cannot_be_spoofed(
@@ -177,10 +231,10 @@ def test_invalid_payloads_are_rejected_and_sender_cannot_be_spoofed(
         websocket.receive_json()
         for raw_payload in (
             "not json",
-            {"type": "unrecognized", "content": "Hi"},
-            {"type": "message.send", "content": "   "},
-            {"type": "message.send", "content": "x" * 5001},
-            {"type": "message.send", "content": "spoof", "sender_id": ids["bob"]},
+            {"type": "unrecognized", "client_message_id": "invalid-type", "content": "Hi"},
+            {"type": "message.send", "client_message_id": "empty", "content": "   "},
+            {"type": "message.send", "client_message_id": "too-long", "content": "x" * 5001},
+            {"type": "message.send", "client_message_id": "spoof", "content": "spoof", "sender_id": ids["bob"]},
         ):
             if isinstance(raw_payload, str):
                 websocket.send_text(raw_payload)
@@ -188,7 +242,7 @@ def test_invalid_payloads_are_rejected_and_sender_cannot_be_spoofed(
                 websocket.send_json(raw_payload)
             assert websocket.receive_json()["type"] == "error"
 
-        websocket.send_json({"type": "message.send", "content": "trusted identity"})
+        websocket.send_json({"type": "message.send", "client_message_id": "trusted-1", "content": "trusted identity"})
         event = websocket.receive_json()
         assert event["data"]["sender_id"] == ids["alice"]
         assert event["data"]["sender_username"] == "alice"
@@ -210,9 +264,9 @@ def test_websocket_message_rate_limit_is_per_user_and_keeps_connection(
         subprotocols=ticket_protocols(issue_ticket(websocket_client, ids["alice"])),
     ) as websocket:
         assert websocket.receive_json()["type"] == "connection.ready"
-        websocket.send_json({"type": "message.send", "content": "first"})
+        websocket.send_json({"type": "message.send", "client_message_id": "limited-1", "content": "first"})
         assert websocket.receive_json()["type"] == "message.created"
-        websocket.send_json({"type": "message.send", "content": "second"})
+        websocket.send_json({"type": "message.send", "client_message_id": "limited-2", "content": "second"})
         limited = websocket.receive_json()
         assert limited["type"] == "error"
         assert limited["data"]["code"] == "rate_limited"
