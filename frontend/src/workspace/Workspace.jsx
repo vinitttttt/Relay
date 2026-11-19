@@ -21,7 +21,7 @@ function formatTime(value) {
 }
 
 export function Workspace() {
-  const { user, signOut, apiFetch } = useAuth()
+  const { user, token, signOut, apiFetch } = useAuth()
   const [conversations, setConversations] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [loadingConversations, setLoadingConversations] = useState(true)
@@ -89,6 +89,16 @@ export function Workspace() {
 
   const selected = useMemo(() => conversations.find((item) => item.id === selectedId) || null, [conversations, selectedId])
 
+  const updateConversationPreview = useCallback((conversationId, message) => {
+    setConversations((current) => current.map((item) => item.id === conversationId
+      ? { ...item, latest_message: { ...message, sender: message.sender || { id: message.sender_id, username: message.sender_username } } }
+      : item).sort((a, b) => {
+      const timeA = new Date(a.latest_message?.created_at || a.created_at).getTime()
+      const timeB = new Date(b.latest_message?.created_at || b.created_at).getTime()
+      return timeB - timeA
+    }))
+  }, [])
+
   async function openDirectConversation(profile) {
     setOpeningUserId(profile.id)
     setSearchError('')
@@ -132,7 +142,7 @@ export function Workspace() {
       />
       <section className="workspace-main" aria-label="Conversation area">
         {selected
-          ? <ChatWindow key={selected.id} conversation={selected} title={conversationTitle(selected, user)} user={user} apiFetch={apiFetch} onBack={() => setSelectedId(null)} />
+          ? <ChatWindow key={selected.id} conversation={selected} title={conversationTitle(selected, user)} user={user} token={token} apiFetch={apiFetch} onMessage={updateConversationPreview} onBack={() => setSelectedId(null)} />
           : <ChatPlaceholder username={user?.username} />}
       </section>
     </main>
