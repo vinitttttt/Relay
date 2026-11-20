@@ -1,127 +1,136 @@
-# Relay
+# Relay — Real-Time Messaging Platform
 
-Relay is a full-stack real-time messaging application built with FastAPI, React, SQLAlchemy, and SQLite. It includes user registration and login, conversation and message REST APIs, paginated history, and authenticated real-time messaging over WebSockets.
+Relay is a full-stack messaging application for account registration, finding people by username, and having direct conversations. Messages are persisted through a REST API and delivered to connected participants over authenticated WebSockets.
 
-## Repository layout
+**Live demo: [Try Relay](https://relay-1f.onrender.com)**
 
-```text
-backend/
-  alembic/              Database migration environment and revisions
-  app/
-    api/                Routes and reusable request dependencies
-    core/               Environment-based configuration
-    db/                 SQLAlchemy base, engine, and session dependency
-    models/             SQLAlchemy ORM models
-    schemas/             Validated request and response models
-    security/            Argon2 password and JWT helpers
-    services/            Authentication and persistence logic
-    main.py              FastAPI application
-  data/                  Local SQLite database file
-  tests/                 Pytest tests
-frontend/                 React + Vite application
-.env.example              Local configuration template
-```
+## Try Relay
 
-## Requirements
+1. Open the [live application](https://relay-1f.onrender.com) and register with a username, email address, and password.
+2. Sign in, then search for the public username **`vinit`**.
+3. Select the matching user to start or open a direct conversation, then send a message.
+4. To experience live message delivery between participants, use two separate accounts in two browser sessions (for example, a regular window and a private window). Register both accounts and open the same conversation.
 
-- Python 3.10 or newer
-- Node.js 20.19 or newer and npm
+The hosted service may take a short time to respond after inactivity because it runs on free hosting.
 
-No database server or Docker is required for local development. SQLite creates `backend/data/relay.db` automatically; the database and sidecar files are ignored by Git.
+## Screenshots
 
-## Configure and run the backend
+### Sign-in screen
 
-From the repository root, create `.env` from the template only if you do not already have one. Set `JWT_SECRET_KEY` to a random value of at least 32 bytes. Generate one with:
+![Relay sign-in screen](screenshots/Screenshot%202026-11-20%20132341.png)
 
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
+### Workspace and username search
 
-Create the virtual environment once, activate it, and install the backend with development dependencies:
+![Relay workspace with username search](screenshots/Screenshot%202026-11-20%20132438.png)
+
+### Direct conversation
+
+![Relay direct conversation and message composer](screenshots/Screenshot%202026-11-20%20132458.png)
+
+## Features
+
+- Account registration and password authentication.
+- Username search to find other Relay users.
+- One-to-one direct conversations.
+- Real-time message delivery over authenticated WebSockets.
+- Paginated message history, with forward recovery after reconnecting.
+- Retry-safe message sending using client message IDs to prevent duplicate delivery when a request is retried.
+- WebSocket reconnection and recovery of missed messages from persisted history.
+- Configurable rate limits and exact-origin CORS and WebSocket origin checks.
+
+## Technology stack
+
+- **Frontend:** React, Vite, JavaScript.
+- **Backend:** Python, FastAPI, SQLAlchemy, Pydantic, Uvicorn.
+- **Data and migrations:** PostgreSQL for hosted deployments, SQLite for local development, Alembic.
+- **Live communication:** WebSockets, with REST endpoints for authentication, conversation management, and message history.
+- **Hosting:** Render for the live application and Neon for managed PostgreSQL.
+
+## Architecture
+
+The React client uses the versioned FastAPI REST API for authentication, username search, direct-conversation setup, and paginated message history. SQLAlchemy persists users, conversations, memberships, and messages in PostgreSQL or SQLite; Alembic manages schema migrations. For live messaging, the client requests a short-lived, one-use WebSocket ticket over REST and presents it when connecting. The backend checks the ticket, browser origin, and conversation membership before accepting the connection, then broadcasts persisted message events to connected participants on that backend process.
+
+## Local setup
+
+### Prerequisites
+
+- Python 3.10 or newer.
+- Node.js 20.19 or newer and npm.
+- Git.
+- SQLite (included with Python) for local development. PostgreSQL is optional locally.
+
+### Backend — Windows PowerShell
+
+Run from the repository root:
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Set the generated value as JWT_SECRET_KEY in .env. Keep .env private.
 python -m venv backend/.venv
-.\backend\.venv\Scripts\Activate.ps1
+./backend/.venv/Scripts/Activate.ps1
 python -m pip install -e "./backend[dev]"
-```
-
-Apply the initial database migration and start the API from `backend/`:
-
-```powershell
 Set-Location backend
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-The API is available at <http://localhost:8000>; interactive documentation is at <http://localhost:8000/docs>.
+If PowerShell blocks activation, use the virtual environment's Python directly to install: `./backend/.venv/Scripts/python.exe -m pip install -e "./backend[dev]"`. Then, from `backend/`, start the API with `../backend/.venv/Scripts/python.exe -m uvicorn app.main:app --reload`.
 
-## Authentication API
+### Backend — macOS, Linux, or another shell
 
-- `POST /api/v1/auth/register` accepts `username`, `email`, and `password`, and returns a public user profile.
-- `POST /api/v1/auth/login` accepts `identifier` (username or email) and `password`, and returns a bearer access token.
-- `GET /api/v1/auth/me` returns the current user's public profile and requires `Authorization: Bearer <access_token>`.
+Run from the repository root:
 
-Message creation accepts an optional client generated `client_message_id`. Relay stores it uniquely per sender and conversation, returns the existing message for an identical retry, and reports a conflict if the same ID is reused with different content. New clients send this ID over either REST or WebSocket; REST history supports both older `before_id` pages and forward `after_id` pages for reconnect recovery.
-
-Application-created user, conversation, membership, and message timestamps use UTC. SQLite stores its `DateTime` values without timezone metadata, so existing naive timestamps are interpreted as UTC when serialized; API and WebSocket timestamps are emitted with a `Z` suffix. No timestamp data migration is needed. Direct-conversation participant IDs now have restrictive user foreign keys, preventing deletion from leaving an orphaned direct conversation.
-
-Backend logs are JSON records with UTC timestamps and event context. Expected failures are logged without request bodies or credentials; unexpected errors include exception type and traceback locations while omitting exception text. Clients receive generic server-error details.
-
-Emails are trimmed and normalized to lowercase. Passwords are hashed with Argon2 before storage. Login failures use the same response for unknown accounts and incorrect passwords. Public responses never include password hashes.
-
-`JWT_SECRET_KEY` is required for token creation and must be at least 32 bytes. `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` controls access-token lifetime and defaults to 30 minutes. Tokens use HS256 and are checked for signature, expiration, token type, and an existing user.
-
-The frontend obtains a short-lived, single-use WebSocket ticket through `POST /api/v1/auth/websocket-ticket`. The WebSocket endpoint consumes the ticket and binds the connection lifetime to the authenticated JWT expiration. Tickets, active connection state, and rate-limit windows are stored in process memory. They reset on restart and are not shared across multiple workers or replicas; run a single backend process for this MVP. Multi-worker deployment needs shared ticket/rate-limit storage and cross-process WebSocket broadcast.
-
-### Rate limits and browser origins
-
-The in-memory sliding-window limiter has bounded tracking (at most 20,000 active identity buckets). Defaults can be changed in `.env`:
-
-| Environment variables | Default | Applies to |
-| --- | --- | --- |
-| `RATE_LIMIT_LOGIN`, `RATE_LIMIT_LOGIN_WINDOW_SECONDS` | 10 per 60 seconds | Login, independently keyed by client IP and normalized identifier |
-| `RATE_LIMIT_REGISTER`, `RATE_LIMIT_REGISTER_WINDOW_SECONDS` | 5 per 3,600 seconds | Registration, keyed by client IP |
-| `RATE_LIMIT_USER_SEARCH`, `RATE_LIMIT_USER_SEARCH_WINDOW_SECONDS` | 60 per 60 seconds | Username searches, keyed by authenticated user ID |
-| `RATE_LIMIT_WEBSOCKET_MESSAGE`, `RATE_LIMIT_WEBSOCKET_MESSAGE_WINDOW_SECONDS` | 30 per 10 seconds | WebSocket submissions, keyed by authenticated user ID across conversations |
-
-REST limits return HTTP 429 with a `Retry-After` header. WebSocket excess submissions receive an `error` event with code `rate_limited`; the connection remains open. No request payload, credential, or message content is logged by the limiter.
-
-`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact frontend origins. Its local defaults are `http://localhost:5173,http://127.0.0.1:5173`. Credentials are enabled only with explicit origins; wildcard origins are rejected. Browser WebSocket connections use the same explicit allowlist when an `Origin` header is present; clients without an Origin header are accepted after ticket authentication. A same-origin reverse proxy can avoid cross-origin CORS configuration entirely.
-
-For deployment, serve the frontend and API on the same origin or configure a strict CORS allowlist at FastAPI or the reverse proxy. The reverse proxy must forward WebSocket upgrades from `/ws` and use WSS when serving the site over HTTPS. Do not log the `Sec-WebSocket-Protocol` request header because it carries the temporary ticket.
-
-Run backend tests from `backend/` with:
-
-```powershell
-python -m pytest tests
+```sh
+test -f .env || cp .env.example .env
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+# Set the generated value as JWT_SECRET_KEY in .env. Keep .env private.
+python -m venv backend/.venv
+. backend/.venv/bin/activate
+python -m pip install -e 'backend[dev]'
+cd backend
+alembic upgrade head
+uvicorn app.main:app --reload
 ```
 
-## Database models and migrations
+The API is available at `http://localhost:8000`; interactive API documentation is at `http://localhost:8000/docs`.
 
-- `User` stores usernames, normalized emails, password hashes, and creation times.
-- `Conversation` represents a direct or group conversation.
-- `ConversationMember` links users to conversations and records when they joined.
-- `Message` stores content, its conversation, sender, and creation time.
+### Frontend
 
-The models use SQLAlchemy relationships, foreign keys, unique constraints, and indexes. Alembic uses the same `DATABASE_URL` as the application. After changing models, create and review a revision with `alembic revision --autogenerate -m "describe the change"`, then apply it with `alembic upgrade head`. To roll back one revision, use `alembic downgrade -1`. The UTC serialization change does not alter the timestamp schema; the new direct participant foreign keys are added with an SQLite compatible table rebuild that preserves existing rows.
+In a second terminal, from the repository root:
 
-## PostgreSQL later
-
-The application uses a configurable SQLAlchemy URL and can use PostgreSQL without application code changes. Set `DATABASE_URL` in `.env` to a PostgreSQL URL, for example:
-
-```text
-DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/relay
-```
-
-The PostgreSQL server must be available separately. Keep real credentials out of source control and URL-encode reserved characters in credentials.
-
-## Run the frontend
-
-```powershell
-Set-Location frontend
+```sh
+cd frontend
 npm install
 npm run dev
 ```
 
-Vite prints the local development URL after it starts.
+Vite serves the app at `http://localhost:5173` and proxies `/api` and `/ws` to `http://127.0.0.1:8000` by default. To use a different local API address, set `VITE_DEV_API_PROXY_TARGET` in `frontend/.env` (see `frontend/.env.example`).
+
+### Environment configuration
+
+The root `.env` configures the backend. Start with `.env.example` and set a private `JWT_SECRET_KEY` of at least 32 bytes. `DATABASE_URL` defaults to local SQLite; use a PostgreSQL SQLAlchemy URL when connecting to PostgreSQL. Set `CORS_ALLOWED_ORIGINS` to the exact browser origins allowed to use the API. Frontend build variables belong in `frontend/.env`; only `VITE_` variables are exposed to browser code, so never put secrets there. See `.env.example` and `frontend/.env.example` for available settings and defaults. Never commit either `.env` file.
+
+### Database migrations
+
+Apply the checked-in migrations from `backend/` before starting the API:
+
+```sh
+cd backend
+alembic upgrade head
+```
+
+When changing database models, generate and review a migration with `alembic revision --autogenerate -m "describe the change"`, then apply it with `alembic upgrade head`.
+
+## Limitations
+
+- Relay supports direct text conversations. It does not currently include group messaging, file sharing, read receipts, or notifications.
+- WebSocket connections, one-use tickets, and rate-limit counters are held in memory. They reset on restart and are not shared across workers, so the current backend requires a single process.
+- Free hosting may introduce cold starts.
+
+## Future improvements
+
+- Group conversations.
+- File sharing.
+- Read receipts and notifications.
+- Persistent storage for pending messages.
